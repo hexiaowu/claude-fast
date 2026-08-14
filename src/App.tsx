@@ -1,0 +1,572 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { api } from "./lib/api";
+import type { CloseAction, Launcher, SessionInfo } from "./types";
+import Header from "./components/Header";
+import Toolbar from "./components/Toolbar";
+import ProjectList from "./components/ProjectList";
+import StatusBar from "./components/StatusBar";
+import ContextMenu from "./components/ContextMenu";
+import NewLauncherDialog from "./components/NewLauncherDialog";
+import BatchAddDialog from "./components/BatchAddDialog";
+import HealthDialog from "./components/HealthDialog";
+import ConfirmDialog from "./components/ConfirmDialog";
+import SettingsDialog from "./components/SettingsDialog";
+import CloseChoiceDialog from "./components/CloseChoiceDialog";
+import RenameDialog from "./components/RenameDialog";
+import TrashDialog from "./components/TrashDialog";
+import SessionViewer from "./components/SessionViewer";
+
+export type DialogKind = "new" | "batch" | "health" | null;
+
+interface ConfirmState {
+  title: string;
+  message: string;
+  okText?: string;
+  danger?: boolean;
+  onOk: () => void | Promise<void>;
+}
+
+export default function App() {
+  const [launchers, setLaunchers] = useState<Launcher[]>([]);
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [dark, setDark] = useState(false);
+  const [search, setSearch] = useState("");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [dialog, setDialog] = useState<DialogKind>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [claudeOk, setClaudeOk] = useState<boolean | null>(null);
+  const [closeAction, setCloseAction] = useState<CloseAction>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
+  // ---------- 会话管理（v2.0.0 阶段一） ----------
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [sessionsByKey, setSessionsByKey] = useState<
+    Record<string, SessionInfo[] | null | undefined>
+  >({});
+  const [renameTarget, setRenameTarget] = useState<{
+    session: SessionInfo;
+    key: string;
+  } | null>(null);
+  // ---------- 会话内容（v2.0.0 阶段二） ----------
+  const [activeSession, setActiveSession] = useState<{
+    session: SessionInfo;
+    key: string;
+    projectPath: string | null;
+  } | null>(null);
+  const closeActionRef = useRef<CloseAction>(null);
+  closeActionRef.current = closeAction;
+
+  // ---------- 关闭窗口行为 ----------
+
+  // 拦截关闭：minimize → 隐藏到托盘；null（未设置）→ 弹窗询问；quit → 直接退出
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        const action = closeActionRef.current;
+        if (action === "quit") {
+          // 显式销毁窗口（不触发 CloseRequested，避免事件循环；否则窗口不关闭）
+          await getCurrentWindow().destroy();
+          return;
+        }
+        event.preventDefault();
+        if (action === "minimize") {
+          await getCurrentWindow().hide();
+        } else {
+          setCloseChoiceOpen(true);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleCloseChoice = useCallback(
+    async (action: "quit" | "minimize", remember: boolean) => {
+      setCloseChoiceOpen(false);
+      if (remember) {
+        setCloseAction(action);
+        await api.saveConfig(favorites, dark, action).catch(() => {});
+      }
+      if (action === "minimize") {
+        await getCurrentWindow().hide();
+      } else {
+        await api.quitApp();
+      }
+    },
+    [favorites, dark],
+  );
+
+  // ---------- 数据加载 ----------
+
+  const load = useCallback(async () => {
+    try {
+      const [list, cfg] = await Promise.all([api.listLaunchers(), api.loadConfig()]);
+      setLaunchers(list);
+      setFavorites(cfg.favorites ?? []);
+      setDark(cfg.dark ?? false);
+      setCloseAction(cfg.closeAction ?? null);
+      // 选中项可能已被删除，清理
+      setSelectedKey((k) => (k && list.some((l) => l.key === k) ? k : null));
+      // 健康检查在后台异步执行（不阻塞列表渲染）；
+      // 被移除项目的目录检查较慢/超时，结果回来后自动标记失效。
+      api
+        .checkLaunchers(list.map((l) => l.path ?? ""))
+        .then((results) => {
+          setLaunchers((prev) =>
+            prev.map((l, i) => ({ ...l, healthy: results[i] ?? false })),
+          );
+        })
+        .catch(() => {});
+    } catch (e) {
+      showToast("加载失败：" + String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    api.checkClaude().then(setClaudeOk).catch(() => setClaudeOk(false));
+    // 安装模式首次启动：提示数据目录位置（scripts/config 实际存储处）
+    api
+      .getDataRoot()
+      .then((info) => {
+        if (info.installMode && !localStorage.getItem("cf-data-tip")) {
+          localStorage.setItem("cf-data-tip", "1");
+          setToast(`数据目录：${info.path}（启动脚本 scripts/ 与收藏保存在此）`);
+          window.setTimeout(() => setToast(null), 5000);
+        }
+      })
+      .catch(() => {});
+  }, [load]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }, [dark]);
+
+  // ---------- Toast ----------
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  // ---------- 收藏 / 主题 ----------
+
+  const persistConfig = useCallback(
+    async (favs: string[], d: boolean, ca?: CloseAction) => {
+      try {
+        await api.saveConfig(favs, d, ca === undefined ? closeAction : ca);
+      } catch (e) {
+        showToast("保存配置失败：" + String(e));
+      }
+    },
+    [showToast, closeAction],
+  );
+
+  const toggleFav = useCallback(
+    async (key: string) => {
+      const next = favorites.includes(key)
+        ? favorites.filter((f) => f !== key)
+        : [...favorites, key];
+      setFavorites(next);
+      await persistConfig(next, dark);
+    },
+    [favorites, dark, persistConfig],
+  );
+
+  const toggleTheme = useCallback(async () => {
+    const next = !dark;
+    setDark(next);
+    await persistConfig(favorites, next);
+  }, [dark, favorites, persistConfig]);
+
+  // ---------- 列表派生数据 ----------
+
+  const sorted = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = launchers.filter(
+      (l) =>
+        !q ||
+        l.label.toLowerCase().includes(q) ||
+        (l.path ?? "").toLowerCase().includes(q),
+    );
+    const fav = filtered.filter((l) => favorites.includes(l.key));
+    const rest = filtered
+      .filter((l) => !favorites.includes(l.key))
+      .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
+    return [...fav, ...rest];
+  }, [launchers, favorites, search]);
+
+  const missing = launchers.filter((l) => l.healthy === false);
+
+  // ---------- 操作 ----------
+
+  const launch = useCallback(
+    async (key: string) => {
+      const l = launchers.find((x) => x.key === key);
+      if (!l) return;
+      if (l.healthy === false) {
+        showToast(`目录不存在，无法启动：${l.path}`);
+        return;
+      }
+      try {
+        await api.launchClaude(l.file);
+      } catch (e) {
+        showToast("启动失败：" + String(e));
+      }
+    },
+    [launchers, showToast],
+  );
+
+  const openFolder = useCallback(
+    async (l: Launcher) => {
+      if (!l.path) return;
+      try {
+        await api.openFolder(l.path);
+      } catch (e) {
+        showToast("打开文件夹失败：" + String(e));
+      }
+    },
+    [showToast],
+  );
+
+  const copyPath = useCallback(
+    async (l: Launcher) => {
+      if (!l.path) return;
+      try {
+        await navigator.clipboard.writeText(l.path);
+        showToast("路径已复制到剪贴板");
+      } catch {
+        showToast("复制失败");
+      }
+    },
+    [showToast],
+  );
+
+  const removeLauncher = useCallback(
+    async (l: Launcher) => {
+      try {
+        await api.deleteLauncher(l.file);
+      } catch (e) {
+        showToast("删除失败：" + String(e));
+        return;
+      }
+      const favs = favorites.filter((f) => f !== l.key);
+      if (favs.length !== favorites.length) {
+        setFavorites(favs);
+        await persistConfig(favs, dark);
+      }
+      await load();
+      showToast(`已删除 ${l.label}`);
+    },
+    [favorites, dark, persistConfig, load, showToast],
+  );
+
+  const confirmRemove = useCallback(
+    (l: Launcher) => {
+      setConfirm({
+        title: "移除启动脚本",
+        message: `将永久删除以下启动脚本：\n\n${l.label}\n${l.file}\n\n继续？`,
+        okText: "删除",
+        danger: true,
+        onOk: () => removeLauncher(l),
+      });
+    },
+    [removeLauncher],
+  );
+
+  // ---------- 会话管理（v2.0.0 阶段一） ----------
+
+  const toggleExpand = useCallback(
+    async (key: string) => {
+      if (expandedKey === key) {
+        setExpandedKey(null);
+        return;
+      }
+      setExpandedKey(key);
+      const l = launchers.find((x) => x.key === key);
+      if (!l?.path) {
+        showToast("该项目未解析到路径，无法读取会话");
+        return;
+      }
+      setSessionsByKey((prev) => ({ ...prev, [key]: null })); // 加载中
+      try {
+        const list = await api.listSessions(l.path);
+        setSessionsByKey((prev) => ({ ...prev, [key]: list }));
+      } catch (e) {
+        setSessionsByKey((prev) => ({ ...prev, [key]: [] }));
+        showToast("加载会话失败：" + String(e));
+      }
+    },
+    [expandedKey, launchers, showToast],
+  );
+
+  const renameSession = useCallback(
+    async (newTitle: string) => {
+      if (!renameTarget) return;
+      const { session, key } = renameTarget;
+      await api.renameSession(session.file, newTitle); // 失败时向上抛给对话框显示
+      setRenameTarget(null);
+      // 重命名后刷新该项目会话列表（若仍处于展开状态）
+      if (expandedKey === key) {
+        const l = launchers.find((x) => x.key === key);
+        if (l?.path) {
+          const list = await api.listSessions(l.path).catch(() => null);
+          if (list) setSessionsByKey((prev) => ({ ...prev, [key]: list }));
+        }
+      }
+      showToast("已重命名");
+    },
+    [renameTarget, expandedKey, launchers, showToast],
+  );
+
+  const refreshSessions = useCallback(
+    async (key: string) => {
+      const l = launchers.find((x) => x.key === key);
+      if (!l?.path) return;
+      const list = await api.listSessions(l.path).catch(() => null);
+      if (list) setSessionsByKey((prev) => ({ ...prev, [key]: list }));
+    },
+    [launchers],
+  );
+
+  const deleteSession = useCallback(
+    async (key: string, session: SessionInfo) => {
+      try {
+        await api.deleteSession(session.file);
+        await refreshSessions(key);
+        // 右侧正显示该会话 → 清空
+        setActiveSession((cur) =>
+          cur && cur.session.file === session.file ? null : cur,
+        );
+        showToast(`已删除「${session.title}」，可在回收站恢复`);
+      } catch (e) {
+        showToast("删除失败：" + String(e));
+      }
+    },
+    [refreshSessions, showToast],
+  );
+
+  const confirmDeleteSession = useCallback(
+    (key: string, session: SessionInfo) => {
+      setConfirm({
+        title: "删除会话",
+        message: `将删除会话：\n\n「${session.title}」\n\n删除后移入回收站（可恢复），继续？`,
+        okText: "删除",
+        danger: true,
+        onOk: () => deleteSession(key, session),
+      });
+    },
+    [deleteSession],
+  );
+
+  // ---------- 会话内容（v2.0.0 阶段二） ----------
+
+  const loadSessionMessages = useCallback(
+    async (key: string, session: SessionInfo) => {
+      const launcher = launchers.find((x) => x.key === key);
+      setActiveSession({
+        session,
+        key,
+        projectPath: launcher?.path ?? null,
+      });
+    },
+    [launchers],
+  );
+
+  const resumeSession = useCallback(
+    async (key: string, session: SessionInfo) => {
+      const launcher = launchers.find((x) => x.key === key);
+      if (!launcher?.path) {
+        showToast("该项目未解析到路径，无法继续对话");
+        return;
+      }
+      try {
+        await api.resumeSession(session.file, launcher.path);
+        showToast(`已打开「${session.title}」的继续对话窗口`);
+      } catch (e) {
+        showToast("启动失败：" + String(e));
+      }
+    },
+    [launchers, showToast],
+  );
+
+  // ---------- 渲染 ----------
+
+  return (
+    <div className="app">
+      <Header
+        dark={dark}
+        onToggleTheme={toggleTheme}
+        claudeOk={claudeOk}
+        missingCount={missing.length}
+        onHealth={() => setDialog("health")}
+        onSettings={() => setSettingsOpen(true)}
+      />
+
+      <Toolbar
+        search={search}
+        onSearch={setSearch}
+        onNew={() => setDialog("new")}
+        onBatch={() => setDialog("batch")}
+        onHealth={() => setDialog("health")}
+        onTrash={() => setTrashOpen(true)}
+      />
+
+      <main className="main main-split">
+        <div className="main-left">
+          <ProjectList
+            items={sorted}
+            favorites={favorites}
+            selectedKey={selectedKey}
+            expandedKey={expandedKey}
+            activeSessionFile={activeSession?.session.file ?? null}
+            sessionsByKey={sessionsByKey}
+            onSelect={setSelectedKey}
+            onLaunch={launch}
+            onToggleFav={toggleFav}
+            onToggleExpand={toggleExpand}
+            onRenameSession={(key, session) => setRenameTarget({ session, key })}
+            onDeleteSession={confirmDeleteSession}
+            onOpenSession={loadSessionMessages}
+            onResumeSession={resumeSession}
+            onContextMenu={(x, y, key) => setMenu({ x, y, key })}
+          />
+        </div>
+        <SessionViewer
+          session={activeSession?.session ?? null}
+          projectPath={activeSession?.projectPath ?? null}
+          onResume={() => {
+            if (activeSession) {
+              resumeSession(activeSession.key, activeSession.session);
+            }
+          }}
+          onToast={showToast}
+        />
+      </main>
+
+      <StatusBar
+        total={launchers.length}
+        favCount={favorites.length}
+        missingCount={missing.length}
+        claudeOk={claudeOk}
+      />
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          launcher={launchers.find((l) => l.key === menu.key) ?? null}
+          favorites={favorites}
+          onClose={() => setMenu(null)}
+          onToggleFav={toggleFav}
+          onOpenFolder={openFolder}
+          onCopyPath={copyPath}
+          onRemove={confirmRemove}
+          onHealth={() => {
+            setMenu(null);
+            setDialog("health");
+          }}
+        />
+      )}
+
+      {dialog === "new" && (
+        <NewLauncherDialog
+          onClose={() => setDialog(null)}
+          onCreated={async () => {
+            setDialog(null);
+            await load();
+          }}
+        />
+      )}
+
+      {dialog === "batch" && (
+        <BatchAddDialog
+          onClose={() => setDialog(null)}
+          onDone={async (count) => {
+            setDialog(null);
+            await load();
+            showToast(`批量添加完成：新增 ${count} 个启动脚本`);
+          }}
+        />
+      )}
+
+      {dialog === "health" && (
+        <HealthDialog
+          launchers={launchers}
+          claudeOk={claudeOk}
+          onClose={() => setDialog(null)}
+          onDelete={async (items) => {
+            for (const l of items) await removeLauncher(l);
+            setDialog(null);
+          }}
+        />
+      )}
+
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.title}
+          message={confirm.message}
+          okText={confirm.okText}
+          danger={confirm.danger}
+          onCancel={() => setConfirm(null)}
+          onOk={async () => {
+            await confirm.onOk();
+            setConfirm(null);
+          }}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          closeAction={closeAction}
+          onClose={() => setSettingsOpen(false)}
+          onSave={async (action) => {
+            setCloseAction(action);
+            await persistConfig(favorites, dark, action);
+            setSettingsOpen(false);
+            showToast("设置已保存");
+          }}
+        />
+      )}
+
+      {renameTarget && (
+        <RenameDialog
+          sessionTitle={renameTarget.session.title}
+          onClose={() => setRenameTarget(null)}
+          onRenamed={renameSession}
+        />
+      )}
+
+      {trashOpen && (
+        <TrashDialog
+          onClose={() => setTrashOpen(false)}
+          onChanged={() => {
+            // 回收站操作后刷新当前展开项目的会话列表
+            if (expandedKey) refreshSessions(expandedKey);
+          }}
+          onToast={showToast}
+        />
+      )}
+
+      {closeChoiceOpen && (
+        <CloseChoiceDialog
+          onClose={() => setCloseChoiceOpen(false)}
+          onChoose={handleCloseChoice}
+        />
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
