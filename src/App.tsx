@@ -184,6 +184,22 @@ export default function App() {
     [favorites, dark, persistConfig],
   );
 
+  /** 收藏拖拽排序：按 key 重排（非索引），对过滤/失效 key 天然安全 */
+  const reorderFavorites = useCallback(
+    async (draggedKey: string, targetKey: string, before: boolean) => {
+      if (draggedKey === targetKey) return;
+      if (!favorites.includes(draggedKey) || !favorites.includes(targetKey))
+        return;
+      const next = favorites.filter((k) => k !== draggedKey);
+      const to = next.indexOf(targetKey);
+      next.splice(before ? to : to + 1, 0, draggedKey);
+      if (next.every((k, i) => k === favorites[i])) return; // 位置未变，免写盘
+      setFavorites(next);
+      await persistConfig(next, dark);
+    },
+    [favorites, dark, persistConfig],
+  );
+
   const toggleTheme = useCallback(async () => {
     const next = !dark;
     setDark(next);
@@ -200,7 +216,11 @@ export default function App() {
         l.label.toLowerCase().includes(q) ||
         (l.path ?? "").toLowerCase().includes(q),
     );
-    const fav = filtered.filter((l) => favorites.includes(l.key));
+    // 收藏组按 favorites 数组顺序渲染（拖拽排序的真源；launchers 原始顺序与此无关）
+    const byKey = new Map(filtered.map((l) => [l.key, l]));
+    const fav = favorites
+      .map((k) => byKey.get(k))
+      .filter((l): l is Launcher => !!l);
     const rest = filtered
       .filter((l) => !favorites.includes(l.key))
       .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
@@ -435,6 +455,8 @@ export default function App() {
             onSelect={setSelectedKey}
             onLaunch={launch}
             onToggleFav={toggleFav}
+            dragEnabled={search.trim() === ""}
+            onReorderFavorite={reorderFavorites}
             onToggleExpand={toggleExpand}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}

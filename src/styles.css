@@ -325,6 +325,7 @@ code {
   border-radius: var(--radius);
   border: 1px solid transparent;
   cursor: pointer;
+  position: relative; /* 拖拽指示条（.drop-above/below 伪元素）的定位基准 */
   transition: background 0.12s, border-color 0.12s;
 }
 
@@ -431,6 +432,36 @@ code {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: var(--border);
+}
+
+/* ============ 收藏拖拽排序 ============ */
+.row-fav {
+  cursor: grab;
+}
+
+.row.dragging {
+  opacity: 0.45;
+}
+
+.row.drop-above::before,
+.row.drop-below::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* .list 行间距 gap:4px，指示条落在间隙内 */
+.row.drop-above::before {
+  top: -3px;
+}
+
+.row.drop-below::after {
+  bottom: -3px;
 }
 
 /* ============ 会话列表（v2.0.0 阶段一：内联展开） ============ */
