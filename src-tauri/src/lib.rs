@@ -2720,6 +2720,13 @@ mod tests {
 }
 
 /// 退出程序（托盘菜单/前端调用；绕过关闭拦截直接退出）
+/// 当前平台是否支持开机自启动（官方 tauri-plugin-autostart 支持 Windows / macOS / Linux，
+/// 前端据此决定是否显示「开机自启动」设置项；未来某平台不支持时只需改这一处）。
+#[tauri::command]
+fn autostart_supported() -> bool {
+    cfg!(any(windows, target_os = "macos", target_os = "linux"))
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -2729,6 +2736,11 @@ fn quit_app(app: tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // 开机自启动：Windows 写注册表 Run 项 / macOS 用 LaunchAgent（两端均支持）
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None::<Vec<&str>>,
+        ))
         // 单实例：再次启动时不再新建进程，而是把已有主窗口调到前台
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager;
@@ -2806,6 +2818,7 @@ pub fn run() {
             get_session_messages,
             resume_session,
             get_data_root,
+            autostart_supported,
             quit_app
         ])
         .run(tauri::generate_context!())

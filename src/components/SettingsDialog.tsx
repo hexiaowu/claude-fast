@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Modal from "./Modal";
 import type { CloseAction } from "../types";
+import { api } from "../lib/api";
 
 interface Props {
   closeAction: CloseAction;
@@ -17,9 +18,74 @@ const OPTIONS: { value: CloseAction; label: string; desc: string }[] = [
 export default function SettingsDialog({ closeAction, onClose, onSave }: Props) {
   const [value, setValue] = useState<CloseAction>(closeAction);
   const [saving, setSaving] = useState(false);
+  // ---------- 开机自启动 ----------
+  const [autoStart, setAutoStart] = useState(false);
+  const [autoSupported, setAutoSupported] = useState(false);
+  const [autoBusy, setAutoBusy] = useState(false);
+
+  // 打开设置时读取：当前平台是否支持 + 目前是否已开启
+  useEffect(() => {
+    let disposed = false;
+    (async () => {
+      const [supported, enabled] = await Promise.all([
+        api.isAutostartSupported(),
+        api.autostartEnabled(),
+      ]);
+      if (disposed) return;
+      setAutoSupported(supported);
+      setAutoStart(enabled);
+    })().catch(() => {});
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const toggleAutoStart = async (on: boolean) => {
+    setAutoBusy(true);
+    try {
+      if (on) await api.autostartTurnOn();
+      else await api.autostartTurnOff();
+      setAutoStart(on);
+    } catch {
+      setAutoStart(!on); // 失败回滚显示
+    } finally {
+      setAutoBusy(false);
+    }
+  };
 
   return (
     <Modal title="设置" width={460} onClose={onClose}>
+      {autoSupported && (
+        <>
+          <div style={{ marginBottom: 12, fontWeight: 600 }}>开机自启动</div>
+          <label
+            style={{
+              display: "block",
+              padding: "10px 12px",
+              marginBottom: 16,
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              cursor: "pointer",
+              background: autoStart ? "var(--accent-soft)" : "transparent",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={autoStart}
+              disabled={autoBusy}
+              onChange={(e) => toggleAutoStart(e.target.checked)}
+              style={{ marginRight: 8 }}
+            />
+            <span style={{ fontWeight: 500 }}>登录系统后自动启动 Claude助手</span>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, paddingLeft: 24 }}>
+              {autoBusy
+                ? "正在设置…"
+                : "开启后，开机登录时自动在后台运行本应用"}
+            </div>
+          </label>
+        </>
+      )}
+
       <div style={{ marginBottom: 12, fontWeight: 600 }}>关闭窗口时的行为</div>
       {OPTIONS.map((o) => (
         <label

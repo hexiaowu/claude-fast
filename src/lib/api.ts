@@ -1,4 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isEnabled as autostartIsEnabled,
+  enable as autostartEnable,
+  disable as autostartDisable,
+} from "@tauri-apps/plugin-autostart";
 import type {
   ClaudeProject,
   Config,
@@ -43,4 +48,13 @@ export const api = {
     invoke<void>("resume_session", { file, projectPath }),
   getDataRoot: () => invoke<{ path: string; installMode: boolean }>("get_data_root"),
   quitApp: () => invoke<void>("quit_app"),
+  // ---------- 开机自启动 ----------
+  /** 当前平台是否支持开机自启动（如不支持则设置项不显示） */
+  isAutostartSupported: () => invoke<boolean>("autostart_supported"),
+  /** 当前是否已开启开机自启动 */
+  autostartEnabled: () => autostartIsEnabled(),
+  /** 开启开机自启动 */
+  autostartTurnOn: () => autostartEnable(),
+  /** 关闭开机自启动 */
+  autostartTurnOff: () => autostartDisable(),
 };

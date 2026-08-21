@@ -20,3 +20,6 @@ reasonix.toml
 .DS_Store
 Thumbs.db
 *.log
+
+# codegraph 代码图谱索引（本地重建产物，不入库）
+.codegraph/
