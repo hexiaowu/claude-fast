@@ -2727,6 +2727,20 @@ fn autostart_supported() -> bool {
     cfg!(any(windows, target_os = "macos", target_os = "linux"))
 }
 
+/// 把主窗口显示到最前台（托盘「显示窗口」菜单 / 托盘左键点击 / 单实例回调共用）。
+/// Windows 前台锁定：进程不占前台时 SetFocus 可能被忽略；先强制置顶再取消，
+/// 确保窗口真正浮到最前（隐藏到托盘后点托盘图标恢复时必经此路径）。
+fn show_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();        // 隐藏状态 → 显示
+        let _ = w.unminimize();  // 最小化状态 → 恢复
+        let _ = w.set_focus();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_always_on_top(false);
+    }
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -2743,22 +2757,11 @@ pub fn run() {
         ))
         // 单实例：再次启动时不再新建进程，而是把已有主窗口调到前台
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            use tauri::Manager;
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-                // Windows 前台锁定：进程不占前台时 SetForegroundWindow 可能被忽略，
-                // 先强制置顶再取消，确保窗口真正浮到最前（第二次启动时新进程刚获得
-                // 前台焦点，回调发生在旧进程里，若无此步可能只闪任务栏不弹窗）。
-                let _ = w.set_always_on_top(true);
-                let _ = w.set_always_on_top(false);
-            }
+            show_main_window(app);
         }))
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-            use tauri::Manager;
 
             let show_i = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
@@ -2770,12 +2773,7 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
+                    "show" => show_main_window(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -2786,11 +2784,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
+                        show_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
