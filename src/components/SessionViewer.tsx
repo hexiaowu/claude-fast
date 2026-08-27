@@ -71,7 +71,207 @@ function toolSummary(name: string, input: unknown): string {
   }
 }
 
-/** 工具调用行：一行摘要，点击展开输入 JSON */
+/** 将文本按行拆分，过滤末尾空行 */
+function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+// ---- 简单 LCS diff 算法（O(n*m)，会话内行数有限不会超时） ----
+
+type DiffOp = { type: "equal" | "delete" | "insert"; text: string };
+
+function lcsDiff(oldLines: string[], newLines: string[]): DiffOp[] {
+  const n = oldLines.length;
+  const m = newLines.length;
+  // dp[i][j] = LCS 长度
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] =
+        oldLines[i - 1] === newLines[j - 1]
+          ? dp[i - 1][j - 1] + 1
+          : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  // 回溯生成 diff
+  const ops: DiffOp[] = [];
+  let i = n;
+  let j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      ops.unshift({ type: "equal", text: oldLines[i - 1] });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.unshift({ type: "insert", text: newLines[j - 1] });
+      j--;
+    } else {
+      ops.unshift({ type: "delete", text: oldLines[i - 1] });
+      i--;
+    }
+  }
+  return ops;
+}
+
+// ---- 扩展 diff：给 equal 行加行号，delete/insert 行也带行号 ----
+
+type DiffLine = {
+  op: "equal" | "delete" | "insert";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+};
+
+function enrichDiffOps(ops: DiffOp[]): DiffLine[] {
+  const result: DiffLine[] = [];
+  let oldLn = 1;
+  let newLn = 1;
+  for (const op of ops) {
+    switch (op.type) {
+      case "equal":
+        result.push({ op: "equal", text: op.text, oldLine: oldLn, newLine: newLn });
+        oldLn++;
+        newLn++;
+        break;
+      case "delete":
+        result.push({ op: "delete", text: op.text, oldLine: oldLn, newLine: null });
+        oldLn++;
+        break;
+      case "insert":
+        result.push({ op: "insert", text: op.text, oldLine: null, newLine: newLn });
+        newLn++;
+        break;
+    }
+  }
+  return result;
+}
+
+// ---- 渲染 ----
+
+/** Claude Code 风格 diff 行（行号 + -/ + 前缀 + 内容） */
+function DiffLineRow({ line }: { line: DiffLine }) {
+  const cls = line.op === "delete" ? "diff-del" : line.op === "insert" ? "diff-add" : "";
+  const prefix = line.op === "delete" ? "-" : line.op === "insert" ? "+" : " ";
+  const lineNum = line.oldLine ?? line.newLine ?? null;
+  return (
+    <div className={`diff-line ${cls}`}>
+      <span className="diff-ln">{lineNum ?? ""}</span>
+      <span className="diff-prefix">{prefix}</span>
+      <span className="diff-text">{line.text || " "}</span>
+    </div>
+  );
+}
+
+/** 编辑摘要行：Added N lines, removed M lines */
+function editSummary(oldCount: number, newCount: number): string {
+  const parts: string[] = [];
+  if (newCount > 0) parts.push(`Added ${newCount} line${newCount > 1 ? "s" : ""}`);
+  if (oldCount > 0) parts.push(`removed ${oldCount} line${oldCount > 1 ? "s" : ""}`);
+  return parts.join(", ");
+}
+
+/** 代码变更卡片：Claude Code 风格 */
+function CodeChangeCard({ block }: { block: ContentBlock }) {
+  const name = block.name ?? "";
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  const filePath = (input.file_path as string) ?? "";
+
+  if (name === "Edit") {
+    const oldLines = splitLines(String(input.old_string ?? ""));
+    const newLines = splitLines(String(input.new_string ?? ""));
+    const ops = lcsDiff(oldLines, newLines);
+    const diffLines = enrichDiffOps(ops);
+    return (
+      <details className="diff-card" open={false}>
+        <summary className="diff-summary">
+          <span className="diff-icon">●</span>
+          <span className="diff-title">Edit</span>
+          <span className="diff-path">{filePath}</span>
+        </summary>
+        <div className="diff-summary-sub">
+          {editSummary(oldLines.length, newLines.length)}
+        </div>
+        <div className="diff-body">
+          {diffLines.map((dl, i) => (
+            <DiffLineRow key={i} line={dl} />
+          ))}
+        </div>
+      </details>
+    );
+  }
+
+  if (name === "Write") {
+    const content = splitLines(String(input.content ?? ""));
+    return (
+      <details className="diff-card" open={false}>
+        <summary className="diff-summary">
+          <span className="diff-icon">●</span>
+          <span className="diff-title">Write</span>
+          <span className="diff-path">{filePath}</span>
+        </summary>
+        <div className="diff-summary-sub">
+          Added {content.length} line{content.length > 1 ? "s" : ""}
+        </div>
+        <div className="diff-body">
+          {content.map((line, i) => (
+            <DiffLineRow
+              key={i}
+              line={{ op: "insert", text: line, oldLine: null, newLine: i + 1 }}
+            />
+          ))}
+        </div>
+      </details>
+    );
+  }
+
+  if (name === "MultiEdit") {
+    const edits = (input.edits ?? []) as Array<Record<string, unknown>>;
+    return (
+      <details className="diff-card" open={false}>
+        <summary className="diff-summary">
+          <span className="diff-icon">●</span>
+          <span className="diff-title">MultiEdit</span>
+          <span className="diff-path">{filePath}</span>
+        </summary>
+        <div className="diff-summary-sub">
+          {edits.length} edit{edits.length !== 1 ? "s" : ""}
+        </div>
+        <div className="diff-body">
+          {edits.map((edit, i) => {
+            const oldLines = splitLines(String(edit.old_string ?? ""));
+            const newLines = splitLines(String(edit.new_string ?? ""));
+            const ops = lcsDiff(oldLines, newLines);
+            const diffLines = enrichDiffOps(ops);
+            return (
+              <div key={i} className="diff-edit-group">
+                <div className="diff-edit-separator">
+                  Edit #{i + 1}
+                  <span className="diff-edit-sep-stat">
+                    {editSummary(oldLines.length, newLines.length)}
+                  </span>
+                </div>
+                {diffLines.map((dl, j) => (
+                  <DiffLineRow key={j} line={dl} />
+                ))}
+              </div>
+            );
+          })}
+          {edits.length === 0 && (
+            <div className="diff-empty">No edits</div>
+          )}
+        </div>
+      </details>
+    );
+  }
+
+  return null;
+}
+
+/** 工具调用行：代码变更工具用 Claude Code diff，其他工具用摘要+JSON */
 function ToolUseRow({
   block,
   hasResult,
@@ -82,6 +282,9 @@ function ToolUseRow({
   isError: boolean;
 }) {
   const name = block.name ?? "工具";
+  if (name === "Edit" || name === "Write" || name === "MultiEdit") {
+    return <CodeChangeCard block={block} />;
+  }
   return (
     <details className="tool-row" open={false}>
       <summary className="tool-summary">
