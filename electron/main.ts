@@ -33,7 +33,7 @@ import {
   validateTrashFile,
 } from "./backend/trash";
 
-const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:1420";
+const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;

@@ -7,7 +7,7 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "node tools/dev.mjs",
     "dev:vite": "vite",
     "typecheck": "npm run typecheck:web && npm run typecheck:electron",
     "typecheck:web": "tsc",
@@ -15,7 +15,7 @@
     "test": "vitest run",
     "build": "npm run typecheck && npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
-    "build:electron": "node scripts/build-electron.mjs",
+    "build:electron": "node tools/build-electron.mjs",
     "start": "electron .",
     "dist": "npm run build && electron-builder --win --mac",
     "dist:win": "npm run build && electron-builder --win",

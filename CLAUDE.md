@@ -12,7 +12,7 @@
 | `electron/main.ts` | Electron 主进程：窗口 / 托盘 / 单实例 / 关闭拦截 / 全部 IPC 命令注册 |
 | `electron/preload.ts` | `contextBridge` 白名单 API（渲染进程无 Node 权限，全部经 `ipcRenderer.invoke`） |
 | `electron/backend/` | 后端业务模块：`paths.ts`（数据根/项目目录定位）、`launchers.ts`（脚本列表/创建/查重）、`scriptnames.ts`（命名/模板/`parseCdPath`）、`config.ts`（配置三步保护）、`mangle.ts`（目录名正反解析）、`sessions.ts`（会话列表/元数据/内容解析）、`trash.ts`（回收站）、`platform.ts`（启动/健康检查/resume/批量扫描）、`text.ts`（标题清洗） |
-| `scripts/` | 构建脚本：`dev.mjs`（并行 vite + electron）、`build-electron.mjs`（esbuild 编译主进程） |
+| `tools/` | 构建脚本：`dev.mjs`（并行 vite + electron）、`build-electron.mjs`（esbuild 编译主进程） |
 | `build/` | 打包图标（icon.ico / icon.png / icon.icns） |
 | `README.md` | 使用说明、构建方法 |
 

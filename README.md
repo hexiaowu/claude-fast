@@ -11,7 +11,7 @@ claude-fast/
 │   ├── main.ts              窗口 / 托盘 / 单实例 / 关闭拦截 / IPC 注册
 │   ├── preload.ts           contextBridge 白名单 API（window.claudeFast）
 │   └── backend/             后端业务模块（脚本 / 会话 / 回收站 / 路径解析）
-├── scripts/                 开发构建脚本（dev.mjs / build-electron.mjs）
+├── tools/                   开发构建脚本（dev.mjs / build-electron.mjs）
 ├── build/                   打包图标资源（icon.ico / icon.png / icon.icns）
 ├── app-icon.png             图标源文件
 ├── package.json / vite.config.ts / tsconfig.json / index.html
