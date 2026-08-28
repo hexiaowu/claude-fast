@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import type { ClaudeProject } from "../types";
 import Modal from "./Modal";
@@ -70,6 +70,29 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
     }
   };
 
+  /** 项目 path 去叶子段的父目录（纯前端推导，后端不动） */
+  const parentDir = (p: string): string => {
+    const norm = p.replace(/[\\/]+$/, "");
+    const i = Math.max(norm.lastIndexOf("\\"), norm.lastIndexOf("/"));
+    return i > 0 ? norm.slice(0, i) : "";
+  };
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, ClaudeProject[]>();
+    for (const p of projects ?? []) {
+      const parent = parentDir(p.path);
+      if (!map.has(parent)) map.set(parent, []);
+      map.get(parent)!.push(p);
+    }
+    return [...map.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([parent, items]) => ({
+        parent,
+        leaf: parent ? (parent.split(/[\\/]/).pop() ?? parent) : "（根目录）",
+        items: [...items].sort((a, b) => a.name.localeCompare(b.name)),
+      }));
+  }, [projects]);
+
   const missingCount = (projects ?? []).filter((p) => p.missing).length;
   const existingCount = (projects ?? []).filter((p) => p.existing).length;
 
@@ -96,33 +119,41 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
             Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="skeleton" />
             ))}
-          {projects?.map((p) => (
-            <label
-              key={p.path}
-              className={
-                "batch-item" +
-                (p.missing ? " batch-item-missing" : "") +
-                (p.existing ? " batch-item-done" : "")
-              }
-            >
-              <input
-                type="checkbox"
-                checked={checked.has(p.path)}
-                disabled={p.missing}
-                onChange={() => toggle(p.path)}
-              />
-              <div className="batch-item-body">
-                <div className="row-label">
-                  {p.missing && <span className="batch-missing">[已失效] </span>}
-                  {p.existing && <span className="batch-done">[已添加] </span>}
-                  {p.name}
-                </div>
-                <div className="row-path">
-                  {p.missing && <span className="batch-missing">解析路径：</span>}
-                  {p.path}
-                </div>
+          {grouped.map((g) => (
+            <div key={g.parent || "__root__"}>
+              <div className="batch-group-head" title={g.parent || undefined}>
+                {g.leaf}
+                <span className="group-count">{g.items.length}</span>
               </div>
-            </label>
+              {g.items.map((p) => (
+                <label
+                  key={p.path}
+                  className={
+                    "batch-item" +
+                    (p.missing ? " batch-item-missing" : "") +
+                    (p.existing ? " batch-item-done" : "")
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked.has(p.path)}
+                    disabled={p.missing}
+                    onChange={() => toggle(p.path)}
+                  />
+                  <div className="batch-item-body">
+                    <div className="row-label">
+                      {p.missing && <span className="batch-missing">[已失效] </span>}
+                      {p.existing && <span className="batch-done">[已添加] </span>}
+                      {p.name}
+                    </div>
+                    <div className="row-path">
+                      {p.missing && <span className="batch-missing">解析路径：</span>}
+                      {p.path}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
           ))}
           {projects && projects.length === 0 && (
             <div className="empty">Claude Code 项目目录中没有发现项目</div>
