@@ -1352,3 +1352,7 @@ code {
   color: var(--dim);
   font-weight: 400;
 }
+.group-head-fav .group-caret {
+  visibility: visible;
+  color: var(--star);
+}

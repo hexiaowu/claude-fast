@@ -509,6 +509,7 @@ export default function App() {
         <div className="main-left">
           <ProjectList
             sections={sections}
+            plain={groups.length === 0}
             favorites={favorites}
             selectedKey={selectedKey}
             expandedKey={expandedKey}

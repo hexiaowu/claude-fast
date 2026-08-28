@@ -4,6 +4,8 @@ import type { Launcher, Section, SessionInfo } from "../types";
 
 interface Props {
   sections: Section[];
+  /** true = 未建任何分组：不渲染节标题行，保持旧版平铺观感 */
+  plain: boolean;
   favorites: string[];
   selectedKey: string | null;
   /** 当前展开会话列表的项目 key */
@@ -43,6 +45,7 @@ function formatTime(ms: number): string {
 
 export default function ProjectList({
   sections,
+  plain,
   favorites,
   selectedKey,
   expandedKey,
@@ -275,21 +278,27 @@ export default function ProjectList({
         const isGroup = s.kind === "group";
         return (
           <div className="group" key={s.kind === "group" ? s.name : s.kind}>
-            <div
-              className={`group-head ${isGroup ? "group-head-toggle" : "group-head-static"} ${
-                s.kind === "group" && s.collapsed ? "group-head-collapsed" : ""
-              }`}
-              onClick={isGroup ? () => onToggleGroup(s.name) : undefined}
-              title={isGroup ? (s.collapsed ? "展开分组" : "折叠分组") : undefined}
-            >
-              <span className="group-caret">
-                {s.kind === "favorites" ? "★" : isGroup ? (s.collapsed ? "▸" : "▾") : ""}
-              </span>
-              <span className="group-name">
-                {s.kind === "favorites" ? "收藏" : s.kind === "ungrouped" ? "未分组" : s.name}
-              </span>
-              <span className="group-count">{s.items.length}</span>
-            </div>
+            {(s.kind === "group" || !plain) && (
+              <div
+                className={`group-head ${
+                  s.kind === "favorites"
+                    ? "group-head-fav"
+                    : isGroup
+                      ? "group-head-toggle"
+                      : "group-head-static"
+                } ${s.kind === "group" && s.collapsed ? "group-head-collapsed" : ""}`}
+                onClick={isGroup ? () => onToggleGroup(s.name) : undefined}
+                title={isGroup ? (s.collapsed ? "展开分组" : "折叠分组") : undefined}
+              >
+                <span className="group-caret">
+                  {s.kind === "favorites" ? "★" : isGroup ? (s.collapsed ? "▸" : "▾") : ""}
+                </span>
+                <span className="group-name">
+                  {s.kind === "favorites" ? "收藏" : s.kind === "ungrouped" ? "未分组" : s.name}
+                </span>
+                <span className="group-count">{s.items.length}</span>
+              </div>
+            )}
             {!(isGroup && s.collapsed) && s.items.map(renderRow)}
           </div>
         );
