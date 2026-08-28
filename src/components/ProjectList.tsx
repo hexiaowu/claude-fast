@@ -1,9 +1,9 @@
 import { useCallback, useState } from "react";
 import type { DragEvent } from "react";
-import type { Launcher, SessionInfo } from "../types";
+import type { Launcher, Section, SessionInfo } from "../types";
 
 interface Props {
-  items: Launcher[];
+  sections: Section[];
   favorites: string[];
   selectedKey: string | null;
   /** 当前展开会话列表的项目 key */
@@ -20,6 +20,8 @@ interface Props {
   /** 是否启用拖拽排序（搜索过滤期间禁用） */
   dragEnabled: boolean;
   onToggleExpand: (key: string) => void;
+  /** 折叠/展开分组 */
+  onToggleGroup: (name: string) => void;
   onRenameSession: (key: string, session: SessionInfo) => void;
   onDeleteSession: (key: string, session: SessionInfo) => void;
   onOpenSession: (key: string, session: SessionInfo) => void;
@@ -40,7 +42,7 @@ function formatTime(ms: number): string {
 }
 
 export default function ProjectList({
-  items,
+  sections,
   favorites,
   selectedKey,
   expandedKey,
@@ -52,6 +54,7 @@ export default function ProjectList({
   onReorderFavorite,
   dragEnabled,
   onToggleExpand,
+  onToggleGroup,
   onRenameSession,
   onDeleteSession,
   onOpenSession,
@@ -115,7 +118,8 @@ export default function ProjectList({
     onReorderFavorite(dragged, key, before);
   };
 
-  if (items.length === 0) {
+  const total = sections.reduce((n, s) => n + s.items.length, 0);
+  if (total === 0) {
     return (
       <div className="empty">
         <div className="empty-icon">🗂</div>
@@ -125,9 +129,8 @@ export default function ProjectList({
     );
   }
 
-  return (
-    <div className="list">
-      {items.map((l) => {
+  /** 单行渲染（含收藏星标、拖拽、右键、会话展开），供各分节复用 */
+  const renderRow = (l: Launcher) => {
         const isFav = favorites.includes(l.key);
         const canDrag = dragEnabled && isFav;
         const showDrop = overKey === l.key && l.key !== dragKey;
@@ -261,6 +264,33 @@ export default function ProjectList({
                 )}
               </div>
             )}
+          </div>
+        );
+  };
+
+  return (
+    <div className="list">
+      {sections.map((s) => {
+        if (s.kind === "favorites" && s.items.length === 0) return null;
+        const isGroup = s.kind === "group";
+        return (
+          <div className="group" key={s.kind === "group" ? s.name : s.kind}>
+            <div
+              className={`group-head ${isGroup ? "group-head-toggle" : "group-head-static"} ${
+                s.kind === "group" && s.collapsed ? "group-head-collapsed" : ""
+              }`}
+              onClick={isGroup ? () => onToggleGroup(s.name) : undefined}
+              title={isGroup ? (s.collapsed ? "展开分组" : "折叠分组") : undefined}
+            >
+              <span className="group-caret">
+                {s.kind === "favorites" ? "★" : isGroup ? (s.collapsed ? "▸" : "▾") : ""}
+              </span>
+              <span className="group-name">
+                {s.kind === "favorites" ? "收藏" : s.kind === "ungrouped" ? "未分组" : s.name}
+              </span>
+              <span className="group-count">{s.items.length}</span>
+            </div>
+            {!(isGroup && s.collapsed) && s.items.map(renderRow)}
           </div>
         );
       })}

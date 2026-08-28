@@ -1313,3 +1313,42 @@ code {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--dim);
 }
+
+/* ============ 分组（namespace） ============ */
+.group {
+  margin-bottom: 2px;
+}
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: 8px;
+}
+.group-head-toggle {
+  cursor: pointer;
+}
+.group-head-toggle:hover {
+  background: var(--panel-2);
+}
+.group-head-static .group-caret {
+  visibility: hidden;
+}
+.group-caret {
+  width: 12px;
+  text-align: center;
+  flex: none;
+}
+.group-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-count {
+  color: var(--dim);
+  font-weight: 400;
+}

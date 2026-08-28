@@ -6,6 +6,7 @@ import type {
   Config,
   Group,
   Launcher,
+  Section,
   SessionInfo,
 } from "./types";
 import Header from "./components/Header";
@@ -228,24 +229,65 @@ export default function App() {
 
   // ---------- 列表派生数据 ----------
 
-  const sorted = useMemo(() => {
+  const sections = useMemo((): Section[] => {
     const q = search.trim().toLowerCase();
+    const filtering = q !== "";
     const filtered = launchers.filter(
       (l) =>
         !q ||
         l.label.toLowerCase().includes(q) ||
         (l.path ?? "").toLowerCase().includes(q),
     );
-    // 收藏组按 favorites 数组顺序渲染（拖拽排序的真源；launchers 原始顺序与此无关）
     const byKey = new Map(filtered.map((l) => [l.key, l]));
-    const fav = favorites
-      .map((k) => byKey.get(k))
-      .filter((l): l is Launcher => !!l);
+    const favKeys = new Set(favorites);
+    const fav = favorites.map((k) => byKey.get(k)).filter((l): l is Launcher => !!l);
+
+    // 未建任何分组：保持旧版平铺观感（收藏在前 + 其余按名称排序），不显示任何节标题
+    if (groups.length === 0) {
+      const rest = filtered
+        .filter((l) => !favKeys.has(l.key))
+        .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
+      return [
+        { kind: "favorites", items: fav },
+        { kind: "ungrouped", items: rest },
+      ];
+    }
+
+    const groupedKeys = new Set(groups.flatMap((g) => g.keys));
+    const out: Section[] = [];
+    for (const g of groups) {
+      // 收藏与分组正交：已收藏行只出现在收藏区
+      const items = g.keys
+        .map((k) => byKey.get(k))
+        .filter((l): l is Launcher => !!l && !favKeys.has(l.key));
+      if (filtering && items.length === 0) continue; // 搜索时空组隐藏
+      out.push({
+        kind: "group",
+        name: g.name,
+        items,
+        collapsed: !filtering && collapsed.includes(g.name),
+      });
+    }
     const rest = filtered
-      .filter((l) => !favorites.includes(l.key))
+      .filter((l) => !favKeys.has(l.key) && !groupedKeys.has(l.key))
       .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
-    return [...fav, ...rest];
-  }, [launchers, favorites, search]);
+    if (!(filtering && rest.length === 0)) {
+      out.push({ kind: "ungrouped", items: rest });
+    }
+    return [{ kind: "favorites", items: fav }, ...out];
+  }, [launchers, favorites, groups, collapsed, search]);
+
+  /** 折叠/展开分组（按分组名持久化到 collapsed） */
+  const toggleGroupCollapsed = useCallback(
+    (name: string) => {
+      const next = collapsed.includes(name)
+        ? collapsed.filter((c) => c !== name)
+        : [...collapsed, name];
+      setCollapsed(next);
+      void persistConfig({ collapsed: next });
+    },
+    [collapsed, persistConfig],
+  );
 
   const missing = launchers.filter((l) => l.healthy === false);
 
@@ -466,7 +508,7 @@ export default function App() {
       <main className="main main-split">
         <div className="main-left">
           <ProjectList
-            items={sorted}
+            sections={sections}
             favorites={favorites}
             selectedKey={selectedKey}
             expandedKey={expandedKey}
@@ -478,6 +520,7 @@ export default function App() {
             dragEnabled={search.trim() === ""}
             onReorderFavorite={reorderFavorites}
             onToggleExpand={toggleExpand}
+            onToggleGroup={toggleGroupCollapsed}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}
             onOpenSession={loadSessionMessages}
