@@ -349,7 +349,12 @@ export default function ProjectList({
                 }
                 onDragLeave={
                   isGroup
-                    ? () => setOverGroup((k) => (k === s.name ? null : k))
+                    ? (e) => {
+                        if (overGroup !== s.name) return;
+                        const rt = e.relatedTarget as Node | null;
+                        if (rt && e.currentTarget.contains(rt)) return; // 仍在标题行内（子元素间移动）
+                        setOverGroup(null);
+                      }
                     : undefined
                 }
                 onDrop={isGroup ? (e) => handleGroupDrop(e, s.name) : undefined}
