@@ -26,6 +26,10 @@ interface Props {
   onToggleGroup: (name: string) => void;
   /** 分组标题拖拽换位：把 dragName 移动到 targetName 之前/之后 */
   onReorderGroup: (dragName: string, targetName: string, before: boolean) => void;
+  /** 重命名分组（标题行 ✎） */
+  onRenameGroup: (name: string) => void;
+  /** 删除分组（标题行 🗑，组内项目移到未分组） */
+  onDeleteGroup: (name: string) => void;
   onRenameSession: (key: string, session: SessionInfo) => void;
   onDeleteSession: (key: string, session: SessionInfo) => void;
   onOpenSession: (key: string, session: SessionInfo) => void;
@@ -61,6 +65,8 @@ export default function ProjectList({
   onToggleExpand,
   onToggleGroup,
   onReorderGroup,
+  onRenameGroup,
+  onDeleteGroup,
   onRenameSession,
   onDeleteSession,
   onOpenSession,
@@ -368,6 +374,30 @@ export default function ProjectList({
                   {s.kind === "favorites" ? "收藏" : s.kind === "ungrouped" ? "未分组" : s.name}
                 </span>
                 <span className="group-count">{s.items.length}</span>
+                {isGroup && (
+                  <span className="group-acts">
+                    <button
+                      className="group-act"
+                      title="重命名分组"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRenameGroup(s.name);
+                      }}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      className="group-act"
+                      title="删除分组（项目移到未分组）"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteGroup(s.name);
+                      }}
+                    >
+                      🗑
+                    </button>
+                  </span>
+                )}
               </div>
             )}
             {!(isGroup && s.collapsed) && s.items.map(renderRow)}

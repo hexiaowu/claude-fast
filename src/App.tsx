@@ -14,6 +14,7 @@ import Toolbar from "./components/Toolbar";
 import ProjectList from "./components/ProjectList";
 import StatusBar from "./components/StatusBar";
 import ContextMenu from "./components/ContextMenu";
+import GroupNameDialog from "./components/GroupNameDialog";
 import NewLauncherDialog from "./components/NewLauncherDialog";
 import BatchAddDialog from "./components/BatchAddDialog";
 import HealthDialog from "./components/HealthDialog";
@@ -65,6 +66,12 @@ export default function App() {
     session: SessionInfo;
     key: string;
   } | null>(null);
+  // ---------- 分组对话框（新建/重命名） ----------
+  const [groupDialog, setGroupDialog] = useState<
+    | { mode: "create"; launcherKey: string | null }
+    | { mode: "rename"; group: string }
+    | null
+  >(null);
   // ---------- 会话内容（v2.0.0 阶段二） ----------
   const [activeSession, setActiveSession] = useState<{
     session: SessionInfo;
@@ -328,6 +335,63 @@ export default function App() {
     [groups, persistConfig, showToast],
   );
 
+  /** 新建分组（launcherKey 非空时把该项目一并移入） */
+  const createGroupAndAssign = useCallback(
+    (name: string, launcherKey: string | null) => {
+      const g: Group = { name, keys: launcherKey ? [launcherKey] : [] };
+      const next = [...groups, g];
+      setGroups(next);
+      void persistConfig({ groups: next });
+      setGroupDialog(null);
+      showToast(launcherKey ? `已创建分组「${name}」并移入` : `已创建分组「${name}」`);
+    },
+    [groups, persistConfig, showToast],
+  );
+
+  /** 重命名分组：collapsed 按名匹配，同步替换 */
+  const renameGroup = useCallback(
+    (oldName: string, newName: string) => {
+      if (oldName === newName) {
+        setGroupDialog(null);
+        return;
+      }
+      const next = groups.map((g) => (g.name === oldName ? { ...g, name: newName } : g));
+      const nextCollapsed = collapsed.map((c) => (c === oldName ? newName : c));
+      setGroups(next);
+      setCollapsed(nextCollapsed);
+      void persistConfig({ groups: next, collapsed: nextCollapsed });
+      setGroupDialog(null);
+      showToast("分组已重命名");
+    },
+    [groups, collapsed, persistConfig, showToast],
+  );
+
+  const deleteGroup = useCallback(
+    (name: string) => {
+      const next = groups.filter((g) => g.name !== name);
+      const nextCollapsed = collapsed.filter((c) => c !== name);
+      setGroups(next);
+      setCollapsed(nextCollapsed);
+      void persistConfig({ groups: next, collapsed: nextCollapsed });
+      showToast(`已删除分组「${name}」`);
+    },
+    [groups, collapsed, persistConfig, showToast],
+  );
+
+  const confirmDeleteGroup = useCallback(
+    (name: string) => {
+      const count = groups.find((g) => g.name === name)?.keys.length ?? 0;
+      setConfirm({
+        title: "删除分组",
+        message: `将删除分组「${name}」，组内 ${count} 个项目将移到未分组（项目本身不受影响）。\n\n继续？`,
+        okText: "删除",
+        danger: true,
+        onOk: () => deleteGroup(name),
+      });
+    },
+    [groups, deleteGroup],
+  );
+
   const missing = launchers.filter((l) => l.healthy === false);
 
   // ---------- 操作 ----------
@@ -568,6 +632,8 @@ export default function App() {
             onToggleExpand={toggleExpand}
             onToggleGroup={toggleGroupCollapsed}
             onReorderGroup={reorderGroups}
+            onRenameGroup={(name) => setGroupDialog({ mode: "rename", group: name })}
+            onDeleteGroup={confirmDeleteGroup}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}
             onOpenSession={loadSessionMessages}
@@ -607,6 +673,10 @@ export default function App() {
           onCopyPath={copyPath}
           onRemove={confirmRemove}
           onMoveToGroup={moveToGroup}
+          onStartCreateGroup={(key) => {
+            setMenu(null);
+            setGroupDialog({ mode: "create", launcherKey: key });
+          }}
           onHealth={() => {
             setMenu(null);
             setDialog("health");
@@ -697,6 +767,26 @@ export default function App() {
         <CloseChoiceDialog
           onClose={() => setCloseChoiceOpen(false)}
           onChoose={handleCloseChoice}
+        />
+      )}
+
+      {groupDialog?.mode === "create" && (
+        <GroupNameDialog
+          title="新建分组"
+          existingNames={groups.map((g) => g.name)}
+          onClose={() => setGroupDialog(null)}
+          onSubmit={(name) => createGroupAndAssign(name, groupDialog.launcherKey)}
+        />
+      )}
+
+      {groupDialog?.mode === "rename" && (
+        <GroupNameDialog
+          title="重命名分组"
+          initial={groupDialog.group}
+          exclude={groupDialog.group}
+          existingNames={groups.map((g) => g.name)}
+          onClose={() => setGroupDialog(null)}
+          onSubmit={(name) => renameGroup(groupDialog.group, name)}
         />
       )}
 

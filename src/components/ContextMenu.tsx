@@ -14,6 +14,8 @@ interface Props {
   onRemove: (l: Launcher) => void;
   onHealth: () => void;
   onMoveToGroup: (key: string, groupName: string | null) => void;
+  /** 二级视图「新建分组」：创建分组并把该项目移入 */
+  onStartCreateGroup: (key: string) => void;
 }
 
 export default function ContextMenu({
@@ -29,6 +31,7 @@ export default function ContextMenu({
   onRemove,
   onHealth,
   onMoveToGroup,
+  onStartCreateGroup,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<"main" | "groups">("main");
@@ -90,6 +93,16 @@ export default function ContextMenu({
             {currentNs === g.name ? " ✓" : ""}
           </button>
         ))}
+        <div className="context-sep" />
+        <button
+          className="context-item"
+          onClick={() => {
+            onStartCreateGroup(launcher.key);
+            onClose();
+          }}
+        >
+          ＋ 新建分组…
+        </button>
       </div>
     );
   }
