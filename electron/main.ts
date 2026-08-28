@@ -32,6 +32,7 @@ import {
   restoreTrashedFile,
   validateTrashFile,
 } from "./backend/trash";
+import type { IpcContract } from "./ipc-contract";
 
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
 
@@ -73,8 +74,14 @@ function wrap<A extends unknown[]>(fn: (...args: A) => unknown) {
   };
 }
 
-function handle(channel: string, fn: (...args: any[]) => unknown): void {
-  ipcMain.handle(channel, wrap(fn) as (...args: any[]) => unknown);
+// 注意：ipcMain.handle 的 handler 首参是 IpcMainInvokeEvent，必须剥离后再把
+// contract payload 交给业务函数（曾因把 event 当 payload 用，批量添加的
+// create_launcher 收到 "[object Object]" 而全部报「路径不存在」）
+function handle<K extends keyof IpcContract>(
+  channel: K,
+  fn: (payload: IpcContract[K]) => unknown,
+): void {
+  ipcMain.handle(channel, (_event, payload: IpcContract[K]) => wrap(fn)(payload));
 }
 
 function toInt(v: unknown): number | undefined {
@@ -178,21 +185,22 @@ function registerIpc(): void {
   // ---------- 启动脚本 ----------
   handle("list_launchers", () => listLaunchers(scriptsDirOf(rootDir())));
   handle("load_config", () => loadConfig(rootDir()));
-  handle("save_config", (favorites: string[], dark: boolean, closeAction?: string | null) => {
+  handle("save_config", (p) => {
     const cfg: Config = {
-      favorites: Array.isArray(favorites) ? favorites.map(String) : [],
-      dark: dark === true,
-      closeAction: closeAction === "quit" || closeAction === "minimize" ? closeAction : null,
+      favorites: Array.isArray(p.favorites) ? p.favorites.map(String) : [],
+      dark: p.dark === true,
+      closeAction:
+        p.closeAction === "quit" || p.closeAction === "minimize" ? p.closeAction : null,
     };
     saveConfig(rootDir(), cfg);
   });
-  handle("create_launcher", (dir: string) => createLauncher(rootDir(), String(dir)));
-  handle("delete_launcher", (file: string) => deleteLauncher(String(file)));
-  handle("launch_claude", (file: string) => launchClaude(String(file), rootDir()));
-  handle("open_folder", (p: string) => openFolder(String(p)));
+  handle("create_launcher", (p) => createLauncher(rootDir(), String(p.dir)));
+  handle("delete_launcher", (p) => deleteLauncher(String(p.file)));
+  handle("launch_claude", (p) => launchClaude(String(p.file), rootDir()));
+  handle("open_folder", (p) => openFolder(String(p.path)));
   handle("check_claude", () => checkClaude());
-  handle("check_launchers", (paths: string[]) =>
-    checkLaunchers(Array.isArray(paths) ? paths.map(String) : []));
+  handle("check_launchers", (p) =>
+    checkLaunchers(Array.isArray(p.paths) ? p.paths.map(String) : []));
 
   // ---------- 批量添加 ----------
   handle("scan_claude_projects", () =>
@@ -200,26 +208,25 @@ function registerIpc(): void {
   handle("get_claude_projects_dir", () => projectsDir());
 
   // ---------- 会话管理 ----------
-  handle("list_sessions", (projectPath: string) =>
-    listSessions(projectsDir(), String(projectPath)));
-  handle("rename_session", (file: string, newTitle: string) =>
-    renameSession(String(file), String(newTitle), projectsDir()));
-  handle("delete_session", (file: string) => {
+  handle("list_sessions", (p) => listSessions(projectsDir(), String(p.projectPath)));
+  handle("rename_session", (p) =>
+    renameSession(String(p.file), String(p.newTitle), projectsDir()));
+  handle("delete_session", (p) => {
     // 校验（限 projects 目录下 uuid.jsonl）后移入回收站（先备份再删除）
-    const { path: p } = validateSessionFile(String(file), projectsDir());
-    return deleteSessionFile(p, trashRootDir());
+    const { path: fp } = validateSessionFile(String(p.file), projectsDir());
+    return deleteSessionFile(fp, trashRootDir());
   });
   handle("list_trashed_sessions", () => listTrashedSessionsIn(trashRootDir()));
-  handle("restore_session", (file: string) => {
-    const { path: p } = validateTrashFile(String(file), rootDir());
-    return restoreTrashedFile(p, projectsDir());
+  handle("restore_session", (p) => {
+    const { path: fp } = validateTrashFile(String(p.file), rootDir());
+    return restoreTrashedFile(fp, projectsDir());
   });
-  handle("purge_session", (file: string) => purgeSessionBackup(String(file), rootDir()));
+  handle("purge_session", (p) => purgeSessionBackup(String(p.file), rootDir()));
   handle("purge_trash", () => purgeTrashIn(trashRootDir()));
-  handle("get_session_messages", (file: string, offset?: number) =>
-    getSessionMessages(String(file), projectsDir(), toInt(offset)));
-  handle("resume_session", (file: string, projectPath: string) =>
-    resumeSession(String(file), String(projectPath), projectsDir()));
+  handle("get_session_messages", (p) =>
+    getSessionMessages(String(p.file), projectsDir(), toInt(p.offset)));
+  handle("resume_session", (p) =>
+    resumeSession(String(p.file), String(p.projectPath), projectsDir()));
 
   // ---------- 其他 ----------
   handle("get_data_root", () => {
@@ -245,10 +252,10 @@ function registerIpc(): void {
   });
 
   // ---------- 窗口控制（替代 @tauri-apps/api/window 与 plugin-dialog） ----------
-  handle("pick_folder", async (title?: string) => {
+  handle("pick_folder", async (p) => {
     if (!mainWindow) return null;
     const r = await dialog.showOpenDialog(mainWindow, {
-      title: typeof title === "string" && title !== "" ? title : "选择项目文件夹",
+      title: typeof p.title === "string" && p.title !== "" ? p.title : "选择项目文件夹",
       properties: ["openDirectory", "dontAddToRecent"],
       buttonLabel: "选择此文件夹",
     });
