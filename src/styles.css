@@ -1316,6 +1316,9 @@ code {
 
 /* ============ 分组（namespace） ============ */
 .group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-bottom: 2px;
 }
 .group-head {

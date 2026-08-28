@@ -259,7 +259,8 @@ export default function App() {
       // 收藏与分组正交：已收藏行只出现在收藏区
       const items = g.keys
         .map((k) => byKey.get(k))
-        .filter((l): l is Launcher => !!l && !favKeys.has(l.key));
+        .filter((l): l is Launcher => !!l && !favKeys.has(l.key))
+        .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
       if (filtering && items.length === 0) continue; // 搜索时空组隐藏
       out.push({
         kind: "group",
@@ -280,13 +281,14 @@ export default function App() {
   /** 折叠/展开分组（按分组名持久化到 collapsed） */
   const toggleGroupCollapsed = useCallback(
     (name: string) => {
+      if (search.trim() !== "") return; // 搜索中折叠被忽略，禁止静默改状态
       const next = collapsed.includes(name)
         ? collapsed.filter((c) => c !== name)
         : [...collapsed, name];
       setCollapsed(next);
       void persistConfig({ collapsed: next });
     },
-    [collapsed, persistConfig],
+    [collapsed, persistConfig, search],
   );
 
   const missing = launchers.filter((l) => l.healthy === false);
