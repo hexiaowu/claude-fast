@@ -327,7 +327,7 @@ export default function ProjectList({
         if (s.kind === "favorites" && s.items.length === 0) return null;
         const isGroup = s.kind === "group";
         return (
-          <div className="group" key={s.kind === "group" ? s.name : s.kind}>
+          <div className="group" key={s.kind === "group" ? `g:${s.name}` : s.kind}>
             {(s.kind === "group" || !plain) && (
               <div
                 className={`group-head ${

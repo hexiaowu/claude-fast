@@ -1024,6 +1024,7 @@ code {
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: var(--shadow);
+  max-width: 260px;
 }
 
 .context-title {
@@ -1062,9 +1063,6 @@ code {
   color: var(--danger);
 }
 
-.context-menu {
-  max-width: 260px;
-}
 .context-back {
   color: var(--muted);
   font-weight: 600;

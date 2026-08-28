@@ -338,7 +338,10 @@ export default function App() {
   /** 新建分组（launcherKey 非空时把该项目一并移入） */
   const createGroupAndAssign = useCallback(
     (name: string, launcherKey: string | null) => {
-      if (groups.some((g) => g.name === name)) return; // 重名兜底：直连入口误传时静默拒绝
+      if (groups.some((g) => g.name === name)) {
+        showToast("已存在同名分组");
+        return;
+      } // 重名兜底：直连入口误传时拒绝并提示
       // 先从旧组移除（与 moveToGroup 同语义），避免同一项目出现在多个分组
       const cleaned = groups.map((g) => ({
         ...g,
@@ -386,7 +389,8 @@ export default function App() {
 
   const confirmDeleteGroup = useCallback(
     (name: string) => {
-      const count = groups.find((g) => g.name === name)?.keys.length ?? 0;
+      const keys = groups.find((g) => g.name === name)?.keys ?? [];
+      const count = launchers.filter((l) => keys.includes(l.key)).length;
       setConfirm({
         title: "删除分组",
         message: `将删除分组「${name}」，组内 ${count} 个项目将移到未分组（项目本身不受影响）。\n\n继续？`,
@@ -395,7 +399,7 @@ export default function App() {
         onOk: () => deleteGroup(name),
       });
     },
-    [groups, deleteGroup],
+    [groups, launchers, deleteGroup],
   );
 
   const missing = launchers.filter((l) => l.healthy === false);
