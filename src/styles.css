@@ -1062,6 +1062,18 @@ code {
   color: var(--danger);
 }
 
+.context-menu {
+  max-width: 260px;
+}
+.context-back {
+  color: var(--muted);
+  font-weight: 600;
+}
+.context-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ============ 模态框 ============ */
 .overlay {
   position: fixed;

@@ -48,6 +48,11 @@ export default function App() {
   const [closeAction, setCloseAction] = useState<CloseAction>(null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [collapsed, setCollapsed] = useState<string[]>([]);
+  // 批量删除场景（HealthDialog 循环 await）下闭包 state 会过期，用 ref 镜像最新值
+  const favoritesRef = useRef(favorites);
+  favoritesRef.current = favorites;
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
@@ -308,6 +313,21 @@ export default function App() {
     [groups, persistConfig],
   );
 
+  /** 移动项目到指定分组（null = 移到未分组）：先从旧组移除，再入新组 */
+  const moveToGroup = useCallback(
+    (key: string, groupName: string | null) => {
+      let next = groups.map((g) => ({ ...g, keys: g.keys.filter((k) => k !== key) }));
+      if (groupName !== null) {
+        const target = next.find((g) => g.name === groupName);
+        if (target) target.keys = [...target.keys, key];
+      }
+      setGroups(next);
+      void persistConfig({ groups: next });
+      showToast(groupName === null ? "已移到未分组" : `已移动到 ${groupName}`);
+    },
+    [groups, persistConfig, showToast],
+  );
+
   const missing = launchers.filter((l) => l.healthy === false);
 
   // ---------- 操作 ----------
@@ -362,15 +382,21 @@ export default function App() {
         showToast("删除失败：" + String(e));
         return;
       }
-      const favs = favorites.filter((f) => f !== l.key);
-      if (favs.length !== favorites.length) {
-        setFavorites(favs);
-        await persistConfig({ favorites: favs });
-      }
+      // 用 ref 读最新值：HealthDialog 循环 await 删除时闭包 state 是旧快照
+      const favs = favoritesRef.current.filter((f) => f !== l.key);
+      const nextGroups = groupsRef.current.map((g) => ({
+        ...g,
+        keys: g.keys.filter((k) => k !== l.key),
+      }));
+      favoritesRef.current = favs;
+      groupsRef.current = nextGroups;
+      setFavorites(favs);
+      setGroups(nextGroups);
+      await persistConfig({ favorites: favs, groups: nextGroups });
       await load();
       showToast(`已删除 ${l.label}`);
     },
-    [favorites, persistConfig, load, showToast],
+    [persistConfig, load, showToast],
   );
 
   const confirmRemove = useCallback(
@@ -574,11 +600,13 @@ export default function App() {
           y={menu.y}
           launcher={launchers.find((l) => l.key === menu.key) ?? null}
           favorites={favorites}
+          groups={groups}
           onClose={() => setMenu(null)}
           onToggleFav={toggleFav}
           onOpenFolder={openFolder}
           onCopyPath={copyPath}
           onRemove={confirmRemove}
+          onMoveToGroup={moveToGroup}
           onHealth={() => {
             setMenu(null);
             setDialog("health");
