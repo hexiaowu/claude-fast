@@ -49,10 +49,11 @@ export default function ContextMenu({
   }, [onClose]);
 
   // 防止菜单超出窗口右/下边缘；分组列表可能较长，允许菜单内滚动
+  const top = Math.min(y, window.innerHeight - 260);
   const style: React.CSSProperties = {
-    left: Math.min(x, window.innerWidth - 210),
-    top: Math.min(y, window.innerHeight - 260),
-    maxHeight: window.innerHeight - y - 16,
+    left: Math.min(x, window.innerWidth - 270),
+    top,
+    maxHeight: window.innerHeight - top - 16,
     overflowY: "auto",
   };
 

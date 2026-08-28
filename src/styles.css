@@ -1054,7 +1054,7 @@ code {
   cursor: pointer;
 }
 
-.context-item:hover {
+.context-item:not(:disabled):hover {
   background: var(--panel-2);
 }
 
