@@ -78,13 +78,7 @@ export default function App() {
   // ---------- 配置保存（patch 模式：未提供的字段沿用当前 state） ----------
 
   const persistConfig = useCallback(
-    async (patch: {
-      favorites?: string[];
-      dark?: boolean;
-      closeAction?: CloseAction;
-      groups?: Group[];
-      collapsed?: string[];
-    }) => {
+    async (patch: Partial<Config>) => {
       const cfg: Config = {
         favorites: patch.favorites ?? favorites,
         dark: patch.dark ?? dark,
