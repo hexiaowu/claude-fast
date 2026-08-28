@@ -291,6 +291,23 @@ export default function App() {
     [collapsed, persistConfig, search],
   );
 
+  /** 分组拖拽换位：groups 数组顺序即显示顺序，失效名自然忽略 */
+  const reorderGroups = useCallback(
+    (dragName: string, targetName: string, before: boolean) => {
+      if (dragName === targetName) return;
+      const dragged = groups.filter((g) => g.name === dragName);
+      if (dragged.length === 0) return;
+      const next = groups.filter((g) => g.name !== dragName);
+      const to = next.findIndex((g) => g.name === targetName);
+      if (to < 0) return;
+      next.splice(before ? to : to + 1, 0, ...dragged);
+      if (next.every((g, i) => g.name === groups[i]?.name)) return; // 位置未变，免写盘
+      setGroups(next);
+      void persistConfig({ groups: next });
+    },
+    [groups, persistConfig],
+  );
+
   const missing = launchers.filter((l) => l.healthy === false);
 
   // ---------- 操作 ----------
@@ -524,6 +541,7 @@ export default function App() {
             onReorderFavorite={reorderFavorites}
             onToggleExpand={toggleExpand}
             onToggleGroup={toggleGroupCollapsed}
+            onReorderGroup={reorderGroups}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}
             onOpenSession={loadSessionMessages}

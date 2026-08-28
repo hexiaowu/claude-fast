@@ -24,6 +24,8 @@ interface Props {
   onToggleExpand: (key: string) => void;
   /** 折叠/展开分组 */
   onToggleGroup: (name: string) => void;
+  /** 分组标题拖拽换位：把 dragName 移动到 targetName 之前/之后 */
+  onReorderGroup: (dragName: string, targetName: string, before: boolean) => void;
   onRenameSession: (key: string, session: SessionInfo) => void;
   onDeleteSession: (key: string, session: SessionInfo) => void;
   onOpenSession: (key: string, session: SessionInfo) => void;
@@ -58,6 +60,7 @@ export default function ProjectList({
   dragEnabled,
   onToggleExpand,
   onToggleGroup,
+  onReorderGroup,
   onRenameSession,
   onDeleteSession,
   onOpenSession,
@@ -119,6 +122,47 @@ export default function ProjectList({
     const dragged = dragKey;
     clearDragState();
     onReorderFavorite(dragged, key, before);
+  };
+
+  // ---------- 分组标题拖拽（与收藏行拖拽互不干扰：source/target 均为标题行）----------
+
+  /** 正在拖拽的分组名 */
+  const [dragGroup, setDragGroup] = useState<string | null>(null);
+  /** 悬停目标分组名 */
+  const [overGroup, setOverGroup] = useState<string | null>(null);
+  /** 悬停在上半/下半（决定插入到目标之前/之后） */
+  const [overGroupPos, setOverGroupPos] = useState<"above" | "below">("above");
+
+  const clearGroupDrag = useCallback(() => {
+    setDragGroup(null);
+    setOverGroup(null);
+  }, []);
+
+  const handleGroupDragStart = (e: DragEvent<HTMLDivElement>, name: string) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", `group:${name}`); // WebKit：无 data 拖拽不会启动
+    setDragGroup(name);
+  };
+
+  const handleGroupDragOver = (e: DragEvent<HTMLDivElement>, name: string) => {
+    if (!dragGroup || dragGroup === name) return; // 不 preventDefault → 此处不可放置
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const r = e.currentTarget.getBoundingClientRect();
+    const pos = e.clientY < r.top + r.height / 2 ? "above" : "below";
+    setOverGroup((k) => (k === name ? k : name)); // 值不变 → React 跳过重渲染
+    setOverGroupPos((p) => (p === pos ? p : pos));
+  };
+
+  const handleGroupDrop = (e: DragEvent<HTMLDivElement>, name: string) => {
+    if (!dragGroup || dragGroup === name) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    const before = e.clientY < r.top + r.height / 2; // 从事件重算，不依赖 state
+    const dragged = dragGroup;
+    clearGroupDrag();
+    onReorderGroup(dragged, name, before);
   };
 
   const total = sections.reduce((n, s) => n + s.items.length, 0);
@@ -286,7 +330,29 @@ export default function ProjectList({
                     : isGroup
                       ? "group-head-toggle"
                       : "group-head-static"
-                } ${s.kind === "group" && s.collapsed ? "group-head-collapsed" : ""}`}
+                } ${s.kind === "group" && s.collapsed ? "group-head-collapsed" : ""} ${
+                  isGroup && s.name === dragGroup ? "group-dragging" : ""
+                } ${
+                  isGroup && overGroup === s.name && dragGroup !== s.name
+                    ? overGroupPos === "above"
+                      ? "group-drop-above"
+                      : "group-drop-below"
+                    : ""
+                }`}
+                draggable={isGroup ? dragEnabled : undefined}
+                onDragStart={
+                  isGroup ? (e) => handleGroupDragStart(e, s.name) : undefined
+                }
+                onDragEnd={isGroup ? clearGroupDrag : undefined}
+                onDragOver={
+                  isGroup ? (e) => handleGroupDragOver(e, s.name) : undefined
+                }
+                onDragLeave={
+                  isGroup
+                    ? () => setOverGroup((k) => (k === s.name ? null : k))
+                    : undefined
+                }
+                onDrop={isGroup ? (e) => handleGroupDrop(e, s.name) : undefined}
                 onClick={isGroup ? () => onToggleGroup(s.name) : undefined}
                 title={isGroup ? (s.collapsed ? "展开分组" : "折叠分组") : undefined}
               >

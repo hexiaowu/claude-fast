@@ -1359,3 +1359,17 @@ code {
   visibility: visible;
   color: var(--star);
 }
+
+/* ---- 分组标题拖拽换位 ---- */
+.group-head-toggle[draggable="true"] {
+  cursor: grab;
+}
+.group-head.group-dragging {
+  opacity: 0.4;
+}
+.group-head.group-drop-above {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.group-head.group-drop-below {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
