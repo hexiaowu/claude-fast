@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./lib/api";
 import type { CloseAction, Launcher, SessionInfo } from "./types";
 import Header from "./components/Header";
@@ -64,31 +63,20 @@ export default function App() {
 
   // 拦截关闭：minimize → 隐藏到托盘；null（未设置）→ 弹窗询问；quit → 直接退出
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    getCurrentWindow()
-      .onCloseRequested(async (event) => {
-        const action = closeActionRef.current;
-        if (action === "quit") {
-          // 显式销毁窗口（不触发 CloseRequested，避免事件循环；否则窗口不关闭）
-          await getCurrentWindow().destroy();
-          return;
-        }
-        event.preventDefault();
-        if (action === "minimize") {
-          await getCurrentWindow().hide();
-        } else {
-          setCloseChoiceOpen(true);
-        }
-      })
-      .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+    // 主进程拦截 close 后转发 window:close-requested，这里按当前设置分发
+    return api.onCloseRequested(async () => {
+      const action = closeActionRef.current;
+      if (action === "quit") {
+        // 显式销毁窗口（绕过关闭拦截，避免事件循环）
+        await api.destroyWindow();
+        return;
+      }
+      if (action === "minimize") {
+        await api.hideWindow();
+      } else {
+        setCloseChoiceOpen(true);
+      }
+    });
   }, []);
 
   const handleCloseChoice = useCallback(
@@ -99,7 +87,7 @@ export default function App() {
         await api.saveConfig(favorites, dark, action).catch(() => {});
       }
       if (action === "minimize") {
-        await getCurrentWindow().hide();
+        await api.hideWindow();
       } else {
         await api.quitApp();
       }

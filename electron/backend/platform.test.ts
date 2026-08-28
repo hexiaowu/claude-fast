@@ -1,0 +1,170 @@
+// 平台交互纯逻辑单元测试（移植自 Rust：validate_resume_path / build_resume_cmdline /
+// build_resume_script / scan_claude_projects；spawn 类函数不测副作用）
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  buildResumeCmdline,
+  buildResumeScript,
+  scanClaudeProjects,
+  scriptsDirOf,
+  validateResumePath,
+} from "./platform";
+import { mangleProjectPath } from "./mangle";
+import { shQuote } from "./scriptnames";
+
+const UUID = "5426d6d0-c08f-43bd-94df-4d6d99e5c699";
+
+let tmp: string;
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fast-test-platform-"));
+});
+
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+describe("validateResumePath", () => {
+  it("空路径拒绝", () => {
+    expect(() => validateResumePath("", "win32")).toThrow("项目路径不能为空");
+  });
+
+  it("不存在的目录拒绝", () => {
+    expect(() => validateResumePath(path.join(tmp, "no-such"), "win32")).toThrow(
+      "项目路径不存在",
+    );
+  });
+
+  it("存在的目录通过", () => {
+    expect(validateResumePath(tmp, "win32")).toBe(tmp);
+  });
+
+  it("Windows 拒绝 cmd 元字符", () => {
+    const mk = (name: string) => {
+      const d = path.join(tmp, "d1");
+      fs.mkdirSync(d, { recursive: true });
+      return validateResumePath(path.join(d, name), "win32");
+    };
+    expect(() => mk('a"b')).toThrow();
+    expect(() => mk("a&b")).toThrow();
+    expect(() => mk("a|b")).toThrow();
+    expect(() => mk("a<b")).toThrow();
+    expect(() => mk("a^b")).toThrow();
+    expect(() => mk("a%b")).toThrow();
+    expect(() => mk("a!b")).toThrow();
+    expect(() => mk("a(b")).toThrow();
+  });
+
+  it("macOS 不额外拒字符（shQuote 已转义），但拒绝控制字符", () => {
+    const d = path.join(tmp, "tricky");
+    fs.mkdirSync(d, { recursive: true });
+    const tricky = path.join(d, "my'app (v2)\\3");
+    fs.mkdirSync(tricky, { recursive: true });
+    expect(validateResumePath(tricky, "darwin")).toBe(tricky);
+    expect(() => validateResumePath(d + "\u0001", "darwin")).toThrow();
+  });
+});
+
+describe("buildResumeCmdline / buildResumeScript", () => {
+  it("Windows 命令行：cd /d + claude --resume", () => {
+    const cmd = buildResumeCmdline(tmp, UUID, "win32");
+    expect(cmd.startsWith('/k cd /d "')).toBe(true);
+    expect(cmd).toContain(`&& claude --resume ${UUID}`);
+  });
+
+  it("Windows 非法路径先被校验拦截", () => {
+    expect(() => buildResumeCmdline("D:\\a&b", UUID, "win32")).toThrow();
+  });
+
+  it("macOS 临时脚本：shQuote 转义 + exec claude --resume", () => {
+    const script = buildResumeScript(tmp, UUID, "darwin");
+    expect(script.startsWith("#!/bin/bash\n")).toBe(true);
+    // Windows 路径的 `\` 经 shQuote 转义为 `\\`（bash 双引号内语义正确）
+    expect(script).toContain(`cd "${shQuote(tmp)}" || exit 1`);
+    expect(script).toContain(`exec claude --resume ${UUID}`);
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "macOS 脚本转义路径中的特殊字符（引号/$ 在 Windows 文件名非法，仅 mac 跑）",
+    () => {
+      const d = path.join(tmp, 'we"ird$path');
+      fs.mkdirSync(d, { recursive: true });
+      const script = buildResumeScript(d, UUID, "darwin");
+      expect(script).toContain(`cd "${shQuote(d)}" || exit 1`);
+      expect(script).toContain('\\"');
+      expect(script).toContain("\\$");
+    },
+  );
+});
+
+describe("scanClaudeProjects", () => {
+  // unmangle 的歧义枚举无法区分「字面 -」与「分隔 -」，且段过多时降级；
+  // 因此 scan 用例的项目路径必须放在**不含 '-'** 的目录下（模拟真实场景中
+  // '-' 多为路径分隔符转义而来的情况）。TEMP 可能被重定向为含 '-' 的路径，
+  // 故优先用 USERPROFILE；它也含 '-' 时跳过。
+  let scanBase: string;
+
+  beforeEach((ctx) => {
+    const home = process.env.USERPROFILE ?? os.homedir();
+    if (home === "" || /-/.test(home)) {
+      ctx.skip();
+      return;
+    }
+    scanBase = path.join(home, `cfxscan${process.pid}${Math.floor(Math.random() * 1e9)}`);
+    fs.mkdirSync(scanBase, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (scanBase) fs.rmSync(scanBase, { recursive: true, force: true });
+  });
+
+  it("mangled 目录反解为真实路径；missing 标记正确", () => {
+    // 真实项目目录（叶子名不含 '-'，保证全分隔候选唯一命中）
+    const projRoot = path.join(scanBase, "p1", "demo");
+    fs.mkdirSync(projRoot, { recursive: true });
+    const projectsDir = path.join(scanBase, "projects");
+    fs.mkdirSync(projectsDir);
+    const mangled = mangleProjectPath(projRoot);
+    fs.mkdirSync(path.join(projectsDir, mangled));
+
+    const list = scanClaudeProjects(projectsDir, path.join(scanBase, "scripts"), "win32");
+    expect(list.length).toBe(1);
+    expect(list[0].path).toBe(projRoot);
+    expect(list[0].name).toBe("demo");
+    expect(list[0].missing).toBe(false);
+    expect(list[0].existing).toBe(false);
+  });
+
+  it("真实路径已不存在 → missing=true，path 为首选候选", () => {
+    const projectsDir = path.join(scanBase, "projects2");
+    fs.mkdirSync(projectsDir);
+    fs.mkdirSync(path.join(projectsDir, "D--ghost"));
+    const list = scanClaudeProjects(projectsDir, path.join(scanBase, "scripts2"), "win32");
+    expect(list.length).toBe(1);
+    expect(list[0].missing).toBe(true);
+    expect(list[0].path).toBe("D:\\ghost");
+  });
+
+  it("已有启动脚本的项目 existing=true", () => {
+    const projRoot = path.join(scanBase, "p2", "alpha");
+    fs.mkdirSync(projRoot, { recursive: true });
+    const projectsDir = path.join(scanBase, "projects3");
+    const scripts = scriptsDirOf(scanBase);
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.mkdirSync(projectsDir);
+    fs.mkdirSync(path.join(projectsDir, mangleProjectPath(projRoot)));
+    fs.writeFileSync(
+      path.join(scripts, "claude-alpha.bat"),
+      `@echo off\r\ncd /d "${projRoot}"`,
+    );
+    const list = scanClaudeProjects(projectsDir, scripts, "win32");
+    expect(list.length).toBe(1);
+    expect(list[0].existing).toBe(true);
+  });
+
+  it("projects 目录不存在返回空数组", () => {
+    expect(scanClaudeProjects(path.join(scanBase, "nope"), scanBase, "win32")).toEqual([]);
+  });
+});

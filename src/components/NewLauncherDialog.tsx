@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import Modal from "./Modal";
 
@@ -15,12 +14,8 @@ export default function NewLauncherDialog({ onClose, onCreated }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const browse = async () => {
-    const picked = await open({
-      directory: true,
-      multiple: false,
-      title: "选择项目文件夹",
-    });
-    if (typeof picked === "string") setDir(picked);
+    const picked = await api.pickFolder("选择项目文件夹");
+    if (picked) setDir(picked);
   };
 
   const submit = async () => {
