@@ -9,12 +9,27 @@ export interface Launcher {
 
 export type CloseAction = "quit" | "minimize" | null;
 
+export interface Group {
+  name: string;
+  keys: string[];
+}
+
 export interface Config {
   favorites: string[];
   dark: boolean;
   /** null/undefined = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction?: CloseAction;
+  /** 项目分组（namespace），数组顺序 = 显示顺序 */
+  groups: Group[];
+  /** 已折叠的分组名 */
+  collapsed: string[];
 }
+
+/** 主列表分节（App 派生，ProjectList 渲染） */
+export type Section =
+  | { kind: "favorites"; items: Launcher[] }
+  | { kind: "group"; name: string; items: Launcher[]; collapsed: boolean }
+  | { kind: "ungrouped"; items: Launcher[] };
 
 export interface CreateResult {
   file: string;

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./lib/api";
-import type { CloseAction, Launcher, SessionInfo } from "./types";
+import type {
+  CloseAction,
+  Config,
+  Group,
+  Launcher,
+  SessionInfo,
+} from "./types";
 import Header from "./components/Header";
 import Toolbar from "./components/Toolbar";
 import ProjectList from "./components/ProjectList";
@@ -39,6 +45,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [claudeOk, setClaudeOk] = useState<boolean | null>(null);
   const [closeAction, setCloseAction] = useState<CloseAction>(null);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [collapsed, setCollapsed] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
@@ -59,6 +67,40 @@ export default function App() {
   } | null>(null);
   const closeActionRef = useRef<CloseAction>(null);
   closeActionRef.current = closeAction;
+
+  // ---------- Toast ----------
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  // ---------- 配置保存（patch 模式：未提供的字段沿用当前 state） ----------
+
+  const persistConfig = useCallback(
+    async (patch: {
+      favorites?: string[];
+      dark?: boolean;
+      closeAction?: CloseAction;
+      groups?: Group[];
+      collapsed?: string[];
+    }) => {
+      const cfg: Config = {
+        favorites: patch.favorites ?? favorites,
+        dark: patch.dark ?? dark,
+        closeAction:
+          patch.closeAction !== undefined ? patch.closeAction : closeAction,
+        groups: patch.groups ?? groups,
+        collapsed: patch.collapsed ?? collapsed,
+      };
+      try {
+        await api.saveConfig(cfg);
+      } catch (e) {
+        showToast("保存配置失败：" + String(e));
+      }
+    },
+    [showToast, favorites, dark, closeAction, groups, collapsed],
+  );
 
   // ---------- 关闭窗口行为 ----------
 
@@ -96,7 +138,7 @@ export default function App() {
       setCloseChoiceOpen(false);
       if (remember) {
         setCloseAction(action);
-        await api.saveConfig(favorites, dark, action).catch(() => {});
+        await persistConfig({ closeAction: action });
       }
       if (action === "minimize") {
         await getCurrentWindow().hide();
@@ -104,7 +146,7 @@ export default function App() {
         await api.quitApp();
       }
     },
-    [favorites, dark],
+    [persistConfig],
   );
 
   // ---------- 数据加载 ----------
@@ -116,6 +158,8 @@ export default function App() {
       setFavorites(cfg.favorites ?? []);
       setDark(cfg.dark ?? false);
       setCloseAction(cfg.closeAction ?? null);
+      setGroups(cfg.groups ?? []);
+      setCollapsed(cfg.collapsed ?? []);
       // 选中项可能已被删除，清理
       setSelectedKey((k) => (k && list.some((l) => l.key === k) ? k : null));
       // 健康检查在后台异步执行（不阻塞列表渲染）；
@@ -153,25 +197,7 @@ export default function App() {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
   }, [dark]);
 
-  // ---------- Toast ----------
-
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 2500);
-  }, []);
-
   // ---------- 收藏 / 主题 ----------
-
-  const persistConfig = useCallback(
-    async (favs: string[], d: boolean, ca?: CloseAction) => {
-      try {
-        await api.saveConfig(favs, d, ca === undefined ? closeAction : ca);
-      } catch (e) {
-        showToast("保存配置失败：" + String(e));
-      }
-    },
-    [showToast, closeAction],
-  );
 
   const toggleFav = useCallback(
     async (key: string) => {
@@ -179,9 +205,9 @@ export default function App() {
         ? favorites.filter((f) => f !== key)
         : [...favorites, key];
       setFavorites(next);
-      await persistConfig(next, dark);
+      await persistConfig({ favorites: next });
     },
-    [favorites, dark, persistConfig],
+    [favorites, persistConfig],
   );
 
   /** 收藏拖拽排序：按 key 重排（非索引），对过滤/失效 key 天然安全 */
@@ -195,16 +221,16 @@ export default function App() {
       next.splice(before ? to : to + 1, 0, draggedKey);
       if (next.every((k, i) => k === favorites[i])) return; // 位置未变，免写盘
       setFavorites(next);
-      await persistConfig(next, dark);
+      await persistConfig({ favorites: next });
     },
-    [favorites, dark, persistConfig],
+    [favorites, persistConfig],
   );
 
   const toggleTheme = useCallback(async () => {
     const next = !dark;
     setDark(next);
-    await persistConfig(favorites, next);
-  }, [dark, favorites, persistConfig]);
+    await persistConfig({ dark: next });
+  }, [dark, persistConfig]);
 
   // ---------- 列表派生数据 ----------
 
@@ -284,12 +310,12 @@ export default function App() {
       const favs = favorites.filter((f) => f !== l.key);
       if (favs.length !== favorites.length) {
         setFavorites(favs);
-        await persistConfig(favs, dark);
+        await persistConfig({ favorites: favs });
       }
       await load();
       showToast(`已删除 ${l.label}`);
     },
-    [favorites, dark, persistConfig, load, showToast],
+    [favorites, persistConfig, load, showToast],
   );
 
   const confirmRemove = useCallback(
@@ -555,7 +581,7 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           onSave={async (action) => {
             setCloseAction(action);
-            await persistConfig(favorites, dark, action);
+            await persistConfig({ closeAction: action });
             setSettingsOpen(false);
             showToast("设置已保存");
           }}

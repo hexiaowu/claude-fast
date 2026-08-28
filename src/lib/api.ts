@@ -18,8 +18,7 @@ import type {
 export const api = {
   listLaunchers: () => invoke<Launcher[]>("list_launchers"),
   loadConfig: () => invoke<Config>("load_config"),
-  saveConfig: (favorites: string[], dark: boolean, closeAction?: string | null) =>
-    invoke<void>("save_config", { favorites, dark, closeAction }),
+  saveConfig: (config: Config) => invoke<void>("save_config", { config }),
   createLauncher: (dir: string) => invoke<CreateResult>("create_launcher", { dir }),
   deleteLauncher: (file: string) => invoke<void>("delete_launcher", { file }),
   launchClaude: (file: string) => invoke<void>("launch_claude", { file }),
