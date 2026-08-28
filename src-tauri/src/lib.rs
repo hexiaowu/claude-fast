@@ -43,6 +43,15 @@ pub struct Launcher {
     // 由前端调用 check_launchers 异步获取后回填。
 }
 
+/// 项目分组（namespace）：name 为唯一键；keys 为组内 launcher key（失效 key 原位保留）。
+/// 数组顺序 = 主列表分组显示顺序（分组拖拽排序的真源）。
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    name: String,
+    keys: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -51,6 +60,12 @@ pub struct Config {
     /// 关闭窗口行为：None=每次询问；Some("quit")=直接退出；Some("minimize")=最小化到托盘
     #[serde(default)]
     close_action: Option<String>,
+    /// 项目分组（namespace）
+    #[serde(default)]
+    groups: Vec<Group>,
+    /// 已折叠的分组名
+    #[serde(default)]
+    collapsed: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -294,18 +309,9 @@ fn load_config() -> Config {
 
 /// 保存配置：写临时文件 → 旧文件备份为 .bak → 原子替换
 #[tauri::command]
-fn save_config(
-    favorites: Vec<String>,
-    dark: bool,
-    close_action: Option<String>,
-) -> Result<(), String> {
+fn save_config(config: Config) -> Result<(), String> {
     let root = resolve_root_dir();
-    let cfg = Config {
-        favorites,
-        dark,
-        close_action,
-    };
-    let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let cfg_path = root.join("config.json");
     let bak_path = root.join("config.json.bak");
     let tmp_path = root.join("config.json.tmp");
@@ -1769,6 +1775,46 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn config_serde_roundtrip_with_groups() {
+        let cfg = Config {
+            favorites: vec!["claude-a".into()],
+            dark: true,
+            close_action: Some("minimize".into()),
+            groups: vec![Group {
+                name: "客户A".into(),
+                keys: vec!["claude-b".into(), "claude-c".into()],
+            }],
+            collapsed: vec!["客户A".into()],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"groups\""));
+        assert!(json.contains("\"collapsed\""));
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.favorites, vec!["claude-a".to_string()]);
+        assert!(back.dark);
+        assert_eq!(back.close_action.as_deref(), Some("minimize"));
+        assert_eq!(back.groups.len(), 1);
+        assert_eq!(back.groups[0].name, "客户A");
+        assert_eq!(
+            back.groups[0].keys,
+            vec!["claude-b".to_string(), "claude-c".to_string()]
+        );
+        assert_eq!(back.collapsed, vec!["客户A".to_string()]);
+    }
+
+    #[test]
+    fn config_serde_backward_compat() {
+        // 旧版 config.json 无 groups/collapsed 字段 → serde default 空值，正常读取
+        let cfg: Config = serde_json::from_str(
+            r#"{"favorites":["claude-x"],"dark":false,"closeAction":null}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.favorites, vec!["claude-x".to_string()]);
+        assert!(cfg.groups.is_empty());
+        assert!(cfg.collapsed.is_empty());
     }
 
     #[test]
