@@ -85,11 +85,11 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
       map.get(parent)!.push(p);
     }
     return [...map.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => a.localeCompare(b, "zh-Hans-CN"))
       .map(([parent, items]) => ({
         parent,
         leaf: parent ? (parent.split(/[\\/]/).pop() ?? parent) : "（根目录）",
-        items: [...items].sort((a, b) => a.name.localeCompare(b.name)),
+        items: [...items].sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN")),
       }));
   }, [projects]);
 
