@@ -1792,6 +1792,7 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"groups\""));
         assert!(json.contains("\"collapsed\""));
+        assert!(json.contains("\"closeAction\""));
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.favorites, vec!["claude-a".to_string()]);
         assert!(back.dark);
