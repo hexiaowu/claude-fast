@@ -338,6 +338,7 @@ export default function App() {
   /** 新建分组（launcherKey 非空时把该项目一并移入） */
   const createGroupAndAssign = useCallback(
     (name: string, launcherKey: string | null) => {
+      if (groups.some((g) => g.name === name)) return; // 重名兜底：直连入口误传时静默拒绝
       // 先从旧组移除（与 moveToGroup 同语义），避免同一项目出现在多个分组
       const cleaned = groups.map((g) => ({
         ...g,
