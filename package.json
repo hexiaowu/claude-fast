@@ -44,6 +44,9 @@
   "build": {
     "appId": "com.claudefast.launcher",
     "productName": "Claude助手",
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "directories": {
       "output": "release"
     },
