@@ -219,30 +219,18 @@ export default function App() {
 
   // ---------- 操作 ----------
 
-  // 防连点：同一项目启动中的 3 秒冷却（终端窗口出现有延迟，快速连点会弹出
-  // 多个终端/多个 claude 实例互相冲突——前几个一闪而过、最后一个才成功）
-  const launchingKeys = useRef<Set<string>>(new Set());
-
   const launch = useCallback(
     async (key: string) => {
       const l = launchers.find((x) => x.key === key);
       if (!l) return;
-      if (launchingKeys.current.has(key)) {
-        showToast(`「${l.label}」正在启动，请稍候`);
-        return;
-      }
       if (l.healthy === false) {
         showToast(`目录不存在，无法启动：${l.path}`);
         return;
       }
-      launchingKeys.current.add(key);
       try {
         await api.launchClaude(l.file);
-        showToast(`正在终端启动 ${l.label} …`);
       } catch (e) {
         showToast("启动失败：" + String(e));
-      } finally {
-        setTimeout(() => launchingKeys.current.delete(key), 3000);
       }
     },
     [launchers, showToast],
