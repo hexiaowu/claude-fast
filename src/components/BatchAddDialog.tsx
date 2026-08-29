@@ -5,7 +5,7 @@ import Modal from "./Modal";
 
 interface Props {
   onClose: () => void;
-  onDone: (createdCount: number) => void;
+  onDone: (addedCount: number) => void;
 }
 
 export default function BatchAddDialog({ onClose, onDone }: Props) {
@@ -14,27 +14,39 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  // 已在 config.projects 清单中的项目路径（小写比对）
+  const [inList, setInList] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    api
-      .getClaudeProjectsDir()
-      .then(setDir)
-      .catch(() => {});
-    api
-      .scanClaudeProjects()
-      .then((list) => {
+    let disposed = false;
+    (async () => {
+      try {
+        const [dir, list, cfg] = await Promise.all([
+          api.getClaudeProjectsDir(),
+          api.scanClaudeProjects(),
+          api.loadConfig(),
+        ]);
+        if (disposed) return;
+        const inListSet = new Set((cfg.projects ?? []).map((p) => p.toLowerCase()));
+        setDir(dir);
         setProjects(list);
-        // 默认勾选未失效且尚未生成启动脚本的项目；
-        // 已失效（路径不存在）和已有脚本的不勾选
+        setInList(inListSet);
+        // 默认勾选未失效且尚未加入清单的项目；已失效的不勾选
         setChecked(
           new Set(
             list
-              .filter((p) => !p.missing && !p.existing)
+              .filter((p) => !p.missing && !inListSet.has(p.path.toLowerCase()))
               .map((p) => p.path),
           ),
         );
-      })
-      .catch((e) => setResult("扫描失败：" + String(e)));
+      } catch (e) {
+        if (disposed) return;
+        setResult("扫描失败：" + String(e));
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   const toggle = (path: string) => {
@@ -50,31 +62,31 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
     const targets = (projects ?? []).filter((p) => checked.has(p.path));
     setBusy(true);
     setResult(null);
-    let created = 0;
+    let added = 0;
     const errors: string[] = [];
     for (const p of targets) {
       try {
-        const r = await api.createLauncher(p.path);
-        if (!r.existed) created++;
+        await api.addProject(p.path);
+        added++;
       } catch (e) {
         errors.push(`${p.name}: ${e}`);
       }
     }
     setBusy(false);
     setResult(
-      `成功处理 ${targets.length} 个（新增 ${created} 个，其余已存在）。` +
+      `成功添加 ${added} 个项目。` +
         (errors.length ? `\n失败 ${errors.length} 个：\n${errors.join("\n")}` : ""),
     );
     if (!errors.length) {
-      onDone(created);
+      onDone(added);
     }
   };
 
   const missingCount = (projects ?? []).filter((p) => p.missing).length;
-  const existingCount = (projects ?? []).filter((p) => p.existing).length;
+  const inListCount = (projects ?? []).filter((p) => inList.has(p.path.toLowerCase())).length;
 
   return (
-    <Modal title="批量添加启动脚本" width={640} onClose={onClose}>
+    <Modal title="批量添加项目" width={640} onClose={onClose}>
       <div className="batch">
         <div className="form-label">
           扫描 Claude Code 项目目录 <code>{dir || "…"}</code>
@@ -84,46 +96,46 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
               ，其中 <span className="batch-missing">{missingCount} 个已失效</span>
             </>
           )}
-          {projects && existingCount > 0 && (
+          {projects && inListCount > 0 && (
             <>
-              ，其中 <span className="batch-done">{existingCount} 个已有启动脚本</span>
+              ，其中 <span className="batch-done">{inListCount} 个已在列表中</span>
             </>
           )}
-          。勾选后一键生成启动脚本：
+          。勾选后一键加入项目列表：
         </div>
         <div className="batch-list">
           {!projects &&
             Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="skeleton" />
             ))}
-          {projects?.map((p) => (
-            <label
-              key={p.path}
-              className={
-                "batch-item" +
-                (p.missing ? " batch-item-missing" : "") +
-                (p.existing ? " batch-item-done" : "")
-              }
-            >
-              <input
-                type="checkbox"
-                checked={checked.has(p.path)}
-                disabled={p.missing}
-                onChange={() => toggle(p.path)}
-              />
-              <div className="batch-item-body">
-                <div className="row-label">
-                  {p.missing && <span className="batch-missing">[已失效] </span>}
-                  {p.existing && <span className="batch-done">[已添加] </span>}
-                  {p.name}
+          {projects?.map((p) => {
+            const listed = inList.has(p.path.toLowerCase());
+            return (
+              <label
+                key={p.path}
+                className={
+                  "batch-item" +
+                  (p.missing ? " batch-item-missing" : "") +
+                  (listed ? " batch-item-done" : "")
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(p.path)}
+                  disabled={p.missing}
+                  onChange={() => toggle(p.path)}
+                />
+                <div className="batch-item-body">
+                  <div className="row-label">
+                    {p.missing && <span className="batch-missing">[已失效] </span>}
+                    {listed && <span className="batch-done">[已在列表] </span>}
+                    {p.name}
+                  </div>
+                  <div className="row-path">{p.path}</div>
                 </div>
-                <div className="row-path">
-                  {p.missing && <span className="batch-missing">解析路径：</span>}
-                  {p.path}
-                </div>
-              </div>
-            </label>
-          ))}
+              </label>
+            );
+          })}
           {projects && projects.length === 0 && (
             <div className="empty">Claude Code 项目目录中没有发现项目</div>
           )}
@@ -131,14 +143,14 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
         {result && <div className="form-error">{result}</div>}
         <div className="form-actions">
           <button className="btn" onClick={onClose}>
-            关闭
+            取消
           </button>
           <button
             className="btn btn-primary"
             onClick={submit}
             disabled={busy || !projects || checked.size === 0}
           >
-            {busy ? "生成中…" : `生成启动脚本（${checked.size}）`}
+            {busy ? "添加中…" : `加入项目列表（${checked.size}）`}
           </button>
         </div>
       </div>

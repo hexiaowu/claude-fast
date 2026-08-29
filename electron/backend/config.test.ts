@@ -16,13 +16,19 @@ afterEach(() => {
 });
 
 describe("loadConfig", () => {
-  it("读取正常配置", () => {
+  it("读取正常配置（含 projects 清单）", () => {
     fs.writeFileSync(
       path.join(tmp, "config.json"),
-      JSON.stringify({ favorites: ["a", "b"], dark: true, closeAction: "quit" }),
+      JSON.stringify({
+        favorites: ["a", "b"],
+        projects: ["D:\\x"],
+        dark: true,
+        closeAction: "quit",
+      }),
     );
     const c = loadConfig(tmp);
     expect(c.favorites).toEqual(["a", "b"]);
+    expect(c.projects).toEqual(["D:\\x"]);
     expect(c.dark).toBe(true);
     expect(c.closeAction).toBe("quit");
   });
@@ -57,10 +63,15 @@ describe("loadConfig", () => {
 describe("saveConfig", () => {
   it("三步保护：临时文件 → .bak 备份 → 原子替换", () => {
     // 第一次保存
-    saveConfig(tmp, { favorites: ["a"], dark: false, closeAction: null });
+    saveConfig(tmp, { favorites: ["a"], projects: [], dark: false, closeAction: null });
     expect(loadConfig(tmp).favorites).toEqual(["a"]);
     // 第二次保存后旧内容应进 .bak
-    saveConfig(tmp, { favorites: ["a", "b"], dark: true, closeAction: "minimize" });
+    saveConfig(tmp, {
+      favorites: ["a", "b"],
+      projects: [],
+      dark: true,
+      closeAction: "minimize",
+    });
     const bak = JSON.parse(fs.readFileSync(path.join(tmp, "config.json.bak"), "utf8"));
     expect(bak.favorites).toEqual(["a"]);
     const main = loadConfig(tmp);

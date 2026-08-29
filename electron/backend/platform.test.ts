@@ -1,5 +1,5 @@
-// 平台交互纯逻辑单元测试（移植自 Rust：validate_resume_path / build_resume_cmdline /
-// build_resume_script / scan_claude_projects；spawn 类函数不测副作用）
+// 平台交互纯逻辑单元测试（resume 校验/命令行、scanClaudeProjects、listProjects；
+// spawn 类函数不测副作用）
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -7,8 +7,8 @@ import * as path from "node:path";
 import {
   buildResumeCmdline,
   buildResumeScript,
+  listProjects,
   scanClaudeProjects,
-  scriptsDirOf,
   validateResumePath,
 } from "./platform";
 import { mangleProjectPath } from "./mangle";
@@ -129,42 +129,70 @@ describe("scanClaudeProjects", () => {
     const mangled = mangleProjectPath(projRoot);
     fs.mkdirSync(path.join(projectsDir, mangled));
 
-    const list = scanClaudeProjects(projectsDir, path.join(scanBase, "scripts"), "win32");
+    const list = scanClaudeProjects(projectsDir, "win32");
     expect(list.length).toBe(1);
     expect(list[0].path).toBe(projRoot);
     expect(list[0].name).toBe("demo");
     expect(list[0].missing).toBe(false);
-    expect(list[0].existing).toBe(false);
   });
 
   it("真实路径已不存在 → missing=true，path 为首选候选", () => {
     const projectsDir = path.join(scanBase, "projects2");
     fs.mkdirSync(projectsDir);
     fs.mkdirSync(path.join(projectsDir, "D--ghost"));
-    const list = scanClaudeProjects(projectsDir, path.join(scanBase, "scripts2"), "win32");
+    const list = scanClaudeProjects(projectsDir, "win32");
     expect(list.length).toBe(1);
     expect(list[0].missing).toBe(true);
     expect(list[0].path).toBe("D:\\ghost");
   });
 
-  it("已有启动脚本的项目 existing=true", () => {
-    const projRoot = path.join(scanBase, "p2", "alpha");
-    fs.mkdirSync(projRoot, { recursive: true });
-    const projectsDir = path.join(scanBase, "projects3");
-    const scripts = scriptsDirOf(scanBase);
-    fs.mkdirSync(scripts, { recursive: true });
-    fs.mkdirSync(projectsDir);
-    fs.mkdirSync(path.join(projectsDir, mangleProjectPath(projRoot)));
-    fs.writeFileSync(
-      path.join(scripts, "claude-alpha.bat"),
-      `@echo off\r\ncd /d "${projRoot}"`,
-    );
-    const list = scanClaudeProjects(projectsDir, scripts, "win32");
-    expect(list.length).toBe(1);
-    expect(list[0].existing).toBe(true);
+  it("projects 目录不存在返回空数组", () => {
+    expect(scanClaudeProjects(path.join(scanBase, "nope"), "win32")).toEqual([]);
+  });
+});
+
+describe("listProjects", () => {
+  let base: string;
+
+  beforeEach((ctx) => {
+    const home = process.env.USERPROFILE ?? os.homedir();
+    if (home === "" || /-/.test(home)) {
+      ctx.skip();
+      return;
+    }
+    base = path.join(home, `cfxlist${process.pid}${Math.floor(Math.random() * 1e9)}`);
+    fs.mkdirSync(base, { recursive: true });
   });
 
-  it("projects 目录不存在返回空数组", () => {
-    expect(scanClaudeProjects(path.join(scanBase, "nope"), scanBase, "win32")).toEqual([]);
+  afterEach(() => {
+    if (base) fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("合并会话扫描与手动清单并去重", () => {
+    const projRoot = path.join(base, "p2", "beta");
+    fs.mkdirSync(projRoot, { recursive: true });
+    const projectsDir = path.join(base, "projects");
+    fs.mkdirSync(projectsDir);
+    fs.mkdirSync(path.join(projectsDir, mangleProjectPath(projRoot)));
+
+    const list = listProjects(projectsDir, [projRoot, "D:\\manual\\delta"], "win32");
+    // 会话扫描 1 个 + 手动 1 个新路径（manual delta 不存在 → missing 显示）
+    expect(list.length).toBe(2);
+    const beta = list.find((x) => x.path === projRoot)!;
+    expect(beta.missing).toBe(false);
+    const delta = list.find((x) => x.path === "D:\\manual\\delta")!;
+    expect(delta.missing).toBe(true); // 手动路径不存在 → 标红
+    expect(delta.name).toBe("delta");
+  });
+
+  it("手动清单大小写不敏感去重", () => {
+    const projectsDir = path.join(base, "projects3");
+    fs.mkdirSync(projectsDir);
+    const list = listProjects(
+      projectsDir,
+      ["D:\\Same\\Path", "d:\\same\\path"],
+      "win32",
+    );
+    expect(list.length).toBe(1);
   });
 });

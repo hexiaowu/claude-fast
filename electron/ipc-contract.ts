@@ -4,16 +4,21 @@
 // 才是这里的 payload——两侧签名由本表在编译期对齐，防止参数错位。
 
 export interface IpcContract {
-  // ---------- 启动脚本 ----------
-  list_launchers: void;
+  // ---------- 项目清单（去脚本化） ----------
+  list_projects: void;
   load_config: void;
-  save_config: { favorites: string[]; dark: boolean; closeAction?: string | null };
-  create_launcher: { dir: string };
-  delete_launcher: { file: string };
-  launch_claude: { file: string };
+  save_config: {
+    favorites: string[];
+    projects: string[];
+    dark: boolean;
+    closeAction?: string | null;
+  };
+  add_project: { path: string };
+  remove_project: { path: string };
+  launch_project: { path: string };
   open_folder: { path: string };
   check_claude: void;
-  check_launchers: { paths: string[] };
+  check_projects: { paths: string[] };
   // ---------- 批量添加 ----------
   scan_claude_projects: void;
   get_claude_projects_dir: void;

@@ -1,27 +1,27 @@
 import { useEffect, useState } from "react";
-import type { Launcher } from "../types";
+import type { Project } from "../types";
 import { api } from "../lib/api";
 import Modal from "./Modal";
 
 interface Props {
-  launchers: Launcher[];
+  items: Project[];
   claudeOk: boolean | null;
   onClose: () => void;
-  onDelete: (items: Launcher[]) => void;
+  onDelete: (items: Project[]) => void;
 }
 
 /** 手动健康检查：打开时现场重新检查所有目录（后台执行，不卡界面） */
-export default function HealthDialog({ launchers, claudeOk, onClose, onDelete }: Props) {
-  const [checked, setChecked] = useState<Launcher[] | null>(null);
+export default function HealthDialog({ items, claudeOk, onClose, onDelete }: Props) {
+  const [checked, setChecked] = useState<Project[] | null>(null);
   const [busy, setBusy] = useState(false);
 
   const run = async () => {
     setChecked(null);
     try {
-      const results = await api.checkLaunchers(launchers.map((l) => l.path ?? ""));
-      setChecked(launchers.map((l, i) => ({ ...l, healthy: results[i] ?? false })));
+      const results = await api.checkProjects(items.map((l) => l.path));
+      setChecked(items.map((l, i) => ({ ...l, healthy: results[i] ?? false })));
     } catch {
-      setChecked(launchers);
+      setChecked(items);
     }
   };
 
@@ -54,7 +54,7 @@ export default function HealthDialog({ launchers, claudeOk, onClose, onDelete }:
               <div key={l.key} className="batch-item">
                 <div className="batch-item-body">
                   <div className="row-label">
-                    {l.label} <span className="tag tag-danger">失效</span>
+                    {l.name} <span className="tag tag-danger">失效</span>
                   </div>
                   <div className="row-path">{l.path}</div>
                 </div>

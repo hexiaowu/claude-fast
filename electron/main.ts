@@ -5,12 +5,16 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, saveConfig, type Config } from "./backend/config";
-import { createLauncher, deleteLauncher, listLaunchers } from "./backend/launchers";
 import {
+  addProject,
   checkClaude,
   checkLaunchers,
   buildResumeCmdline,
+  legacyScriptPaths,
+  launchProject,
+  listProjects,
   openFolder,
+  removeProject,
   resumeSession,
   scanClaudeProjects,
   scriptsDirOf,
@@ -91,36 +95,38 @@ function toInt(v: unknown): number | undefined {
   return undefined;
 }
 
-// ---------------- 窗口与托盘 ----------------
-
-/** 启动启动脚本：Windows 直接 spawn `cmd /c "bat"`（不带 detached——DETACHED_PROCESS
- *  会让控制台脱离默认终端委托，整棵进程树被传统 conhost 各自承载，claude 2.x 的
- *  bash 探测会弹出多个一闪而过的窗口；不带 detached 时控制台走默认终端委托，
- *  与 Tauri 版 ShellExecuteW 行为一致，只弹一个窗口）。macOS 用 Terminal.app。 */
-async function launchScript(file: string): Promise<void> {
-  if (process.platform !== "win32") {
-    return new Promise<void>((resolve, reject) => {
-      const child = spawn("open", ["-a", "Terminal", file], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.on("error", (e) => reject(new Error(String(e))));
-      child.once("spawn", () => {
-        child.unref();
-        resolve();
-      });
-    });
+// ---------------- 旧脚本清单一次性迁移（去脚本化） ----------------
+// 脚本时代的 config.favorites 存的是脚本名 key；迁移时解析数据根 scripts/ 下
+// 旧脚本的 cd 路径完成 key → 项目路径映射：
+//   projects  = 全部脚本指向的项目路径
+//   favorites = 旧收藏 key 映射后的项目路径（找不到的丢弃）
+// 判定：config.json 原始内容含 "projects" 字段（或无 config 文件）即视为已迁移。
+function ensureProjectsMigrated(): void {
+  const root = rootDir();
+  const cfgPath = path.join(root, "config.json");
+  let raw: { projects?: unknown; favorites?: unknown } | null = null;
+  try {
+    raw = JSON.parse(fs.readFileSync(cfgPath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return; // 无 config（全新安装）或不可读——交由 loadConfig 兜底
   }
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn("cmd.exe", ["/c", `"${file}"`], {
-      cwd: rootDir(),
-      windowsVerbatimArguments: true,
-      stdio: "ignore",
-    });
-    child.on("error", (e) => reject(new Error(String(e))));
-    child.once("spawn", () => resolve());
-  });
+  if (!raw || typeof raw !== "object" || Array.isArray(raw.projects)) return;
+
+  const keyToPath = legacyScriptPaths(scriptsDirOf(root));
+  const legacyFavs = Array.isArray(raw.favorites) ? raw.favorites.map(String) : [];
+  const cfg = loadConfig(root);
+  cfg.projects = [...new Set(keyToPath.values())];
+  cfg.favorites = [
+    ...new Set(legacyFavs.map((k) => keyToPath.get(k)).filter((p): p is string => !!p)),
+  ];
+  try {
+    saveConfig(root, cfg);
+  } catch {
+    return; // 写失败时保留内存态本次会话仍可用
+  }
 }
+
+// ---------------- 窗口与托盘 ----------------
 
 function appIcon(): { app: string; tray: string } {
   // nativeImage 不能从 asar 内读图——打包后图标放 extraResources（resources/），
@@ -213,29 +219,40 @@ function createWindow(): void {
 // ---------------- IPC 注册 ----------------
 
 function registerIpc(): void {
-  // ---------- 启动脚本 ----------
-  handle("list_launchers", () => listLaunchers(scriptsDirOf(rootDir())));
+  // ---------- 项目清单（去脚本化） ----------
+  handle("list_projects", () =>
+    listProjects(projectsDir(), loadConfig(rootDir()).projects));
   handle("load_config", () => loadConfig(rootDir()));
   handle("save_config", (p) => {
     const cfg: Config = {
       favorites: Array.isArray(p.favorites) ? p.favorites.map(String) : [],
+      projects: Array.isArray(p.projects) ? p.projects.map(String) : [],
       dark: p.dark === true,
       closeAction:
         p.closeAction === "quit" || p.closeAction === "minimize" ? p.closeAction : null,
     };
     saveConfig(rootDir(), cfg);
   });
-  handle("create_launcher", (p) => createLauncher(rootDir(), String(p.dir)));
-  handle("delete_launcher", (p) => deleteLauncher(String(p.file)));
-  handle("launch_claude", (p) => launchScript(String(p.file)));
+  handle("add_project", (p) => {
+    const cfg = loadConfig(rootDir());
+    cfg.projects = addProject(cfg.projects, String(p.path));
+    saveConfig(rootDir(), cfg);
+  });
+  handle("remove_project", (p) => {
+    const cfg = loadConfig(rootDir());
+    cfg.projects = removeProject(cfg.projects, String(p.path));
+    // 收藏里同步移除（列表键已变为项目路径）
+    cfg.favorites = removeProject(cfg.favorites, String(p.path));
+    saveConfig(rootDir(), cfg);
+  });
+  handle("launch_project", (p) => launchProject(String(p.path)));
   handle("open_folder", (p) => openFolder(String(p.path)));
   handle("check_claude", () => checkClaude());
-  handle("check_launchers", (p) =>
+  handle("check_projects", (p) =>
     checkLaunchers(Array.isArray(p.paths) ? p.paths.map(String) : []));
 
   // ---------- 批量添加 ----------
-  handle("scan_claude_projects", () =>
-    scanClaudeProjects(projectsDir(), scriptsDirOf(rootDir())));
+  handle("scan_claude_projects", () => scanClaudeProjects(projectsDir()));
   handle("get_claude_projects_dir", () => projectsDir());
 
   // ---------- 会话管理 ----------
@@ -344,6 +361,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     app.setAppUserModelId("com.claudefast.launcher");
     Menu.setApplicationMenu(null);
+    ensureProjectsMigrated();
     registerIpc();
     createWindow();
     createTray();

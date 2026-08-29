@@ -3,14 +3,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 export interface Config {
+  /** 收藏的项目绝对路径（置顶） */
   favorites: string[];
+  /** 手动添加的项目路径清单（Claude 会话扫描之外的补充；去脚本化后主列表的一部分） */
+  projects: string[];
   dark: boolean;
   /** null = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction: string | null;
 }
 
 export function defaultConfig(): Config {
-  return { favorites: [], dark: false, closeAction: null };
+  return { favorites: [], projects: [], dark: false, closeAction: null };
 }
 
 /** 剥离 UTF-8 BOM 后解析 JSON（Windows 编辑器可能带 BOM 写入） */
@@ -36,6 +39,7 @@ function readConfigFile(p: string): Config | null {
   if (!c || typeof c !== "object") return null;
   return {
     favorites: Array.isArray(c.favorites) ? c.favorites.map(String) : [],
+    projects: Array.isArray(c.projects) ? c.projects.map(String) : [],
     dark: c.dark === true,
     closeAction:
       c.closeAction === "quit" || c.closeAction === "minimize" ? c.closeAction : null,

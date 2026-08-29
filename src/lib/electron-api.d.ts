@@ -1,18 +1,30 @@
 // preload（electron/preload.ts）通过 contextBridge 暴露的 API 类型声明。
 // 渲染进程经 window.claudeFast 调用后端，无任何 Node/远程能力。
-import type { ClaudeProject, Config, CreateResult, Launcher, SessionInfo, SessionMessages, TrashedSession } from "../types";
+import type {
+  ClaudeProject,
+  Config,
+  Project,
+  SessionInfo,
+  SessionMessages,
+  TrashedSession,
+} from "../types";
 
 export interface ClaudeFastApi {
-  // ---------- 启动脚本 ----------
-  listLaunchers: () => Promise<Launcher[]>;
+  // ---------- 项目清单（去脚本化） ----------
+  listProjects: () => Promise<Project[]>;
   loadConfig: () => Promise<Config>;
-  saveConfig: (favorites: string[], dark: boolean, closeAction?: string | null) => Promise<void>;
-  createLauncher: (dir: string) => Promise<CreateResult>;
-  deleteLauncher: (file: string) => Promise<void>;
-  launchClaude: (file: string) => Promise<void>;
+  saveConfig: (
+    favorites: string[],
+    projects: string[],
+    dark: boolean,
+    closeAction?: string | null,
+  ) => Promise<void>;
+  addProject: (path: string) => Promise<void>;
+  removeProject: (path: string) => Promise<void>;
+  launchProject: (path: string) => Promise<void>;
   openFolder: (path: string) => Promise<void>;
   checkClaude: () => Promise<boolean>;
-  checkLaunchers: (paths: string[]) => Promise<boolean[]>;
+  checkProjects: (paths: string[]) => Promise<boolean[]>;
   // ---------- 批量添加 ----------
   scanClaudeProjects: () => Promise<ClaudeProject[]>;
   getClaudeProjectsDir: () => Promise<string>;

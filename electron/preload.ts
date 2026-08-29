@@ -8,17 +8,21 @@ function invoke<K extends IpcChannel>(channel: K, payload: IpcContract[K]): Prom
 }
 
 const api = {
-  // ---------- 启动脚本 ----------
-  listLaunchers: () => invoke("list_launchers", undefined),
+  // ---------- 项目清单 ----------
+  listProjects: () => invoke("list_projects", undefined),
   loadConfig: () => invoke("load_config", undefined),
-  saveConfig: (favorites: string[], dark: boolean, closeAction?: string | null) =>
-    invoke("save_config", { favorites, dark, closeAction }),
-  createLauncher: (dir: string) => invoke("create_launcher", { dir }),
-  deleteLauncher: (file: string) => invoke("delete_launcher", { file }),
-  launchClaude: (file: string) => invoke("launch_claude", { file }),
+  saveConfig: (
+    favorites: string[],
+    projects: string[],
+    dark: boolean,
+    closeAction?: string | null,
+  ) => invoke("save_config", { favorites, projects, dark, closeAction }),
+  addProject: (path: string) => invoke("add_project", { path }),
+  removeProject: (path: string) => invoke("remove_project", { path }),
+  launchProject: (path: string) => invoke("launch_project", { path }),
   openFolder: (path: string) => invoke("open_folder", { path }),
   checkClaude: () => invoke("check_claude", undefined),
-  checkLaunchers: (paths: string[]) => invoke("check_launchers", { paths }),
+  checkProjects: (paths: string[]) => invoke("check_projects", { paths }),
   // ---------- 批量添加 ----------
   scanClaudeProjects: () => invoke("scan_claude_projects", undefined),
   getClaudeProjectsDir: () => invoke("get_claude_projects_dir", undefined),

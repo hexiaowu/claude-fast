@@ -1,9 +1,9 @@
 import { useCallback, useState } from "react";
 import type { DragEvent } from "react";
-import type { Launcher, SessionInfo } from "../types";
+import type { Project, SessionInfo } from "../types";
 
 interface Props {
-  items: Launcher[];
+  items: Project[];
   favorites: string[];
   selectedKey: string | null;
   /** 当前展开会话列表的项目 key */
@@ -170,10 +170,10 @@ export default function ProjectList({
               </button>
               <div className="row-body" title="展开/收起会话列表">
                 <div className="row-label">
-                  {l.label}
+                  {l.name}
                   {l.healthy === false && <span className="tag tag-danger">失效</span>}
                 </div>
-                <div className="row-path">{l.path ?? "（未解析到路径）"}</div>
+                <div className="row-path">{l.path}</div>
               </div>
               {l.healthy !== false && (
                 <div className="row-actions">
