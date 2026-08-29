@@ -14,9 +14,10 @@ const api = {
   saveConfig: (
     favorites: string[],
     projects: string[],
+    excluded: string[],
     dark: boolean,
     closeAction?: string | null,
-  ) => invoke("save_config", { favorites, projects, dark, closeAction }),
+  ) => invoke("save_config", { favorites, projects, excluded, dark, closeAction }),
   addProject: (path: string) => invoke("add_project", { path }),
   removeProject: (path: string) => invoke("remove_project", { path }),
   launchProject: (path: string) => invoke("launch_project", { path }),

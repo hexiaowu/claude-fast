@@ -16,6 +16,7 @@ export interface ClaudeFastApi {
   saveConfig: (
     favorites: string[],
     projects: string[],
+    excluded: string[],
     dark: boolean,
     closeAction?: string | null,
   ) => Promise<void>;

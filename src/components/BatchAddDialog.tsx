@@ -122,7 +122,7 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
                 <input
                   type="checkbox"
                   checked={checked.has(p.path)}
-                  disabled={p.missing}
+                  disabled={p.missing || listed}
                   onChange={() => toggle(p.path)}
                 />
                 <div className="batch-item-body">

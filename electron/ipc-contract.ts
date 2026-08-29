@@ -10,6 +10,7 @@ export interface IpcContract {
   save_config: {
     favorites: string[];
     projects: string[];
+    excluded: string[];
     dark: boolean;
     closeAction?: string | null;
   };

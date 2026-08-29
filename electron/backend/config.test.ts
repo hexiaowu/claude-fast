@@ -63,12 +63,19 @@ describe("loadConfig", () => {
 describe("saveConfig", () => {
   it("三步保护：临时文件 → .bak 备份 → 原子替换", () => {
     // 第一次保存
-    saveConfig(tmp, { favorites: ["a"], projects: [], dark: false, closeAction: null });
+    saveConfig(tmp, {
+      favorites: ["a"],
+      projects: [],
+      excluded: [],
+      dark: false,
+      closeAction: null,
+    });
     expect(loadConfig(tmp).favorites).toEqual(["a"]);
     // 第二次保存后旧内容应进 .bak
     saveConfig(tmp, {
       favorites: ["a", "b"],
       projects: [],
+      excluded: [],
       dark: true,
       closeAction: "minimize",
     });

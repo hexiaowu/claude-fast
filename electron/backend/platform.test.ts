@@ -175,7 +175,7 @@ describe("listProjects", () => {
     fs.mkdirSync(projectsDir);
     fs.mkdirSync(path.join(projectsDir, mangleProjectPath(projRoot)));
 
-    const list = listProjects(projectsDir, [projRoot, "D:\\manual\\delta"], "win32");
+    const list = listProjects(projectsDir, [projRoot, "D:\\manual\\delta"], [], "win32");
     // 会话扫描 1 个 + 手动 1 个新路径（manual delta 不存在 → missing 显示）
     expect(list.length).toBe(2);
     const beta = list.find((x) => x.path === projRoot)!;
@@ -191,8 +191,32 @@ describe("listProjects", () => {
     const list = listProjects(
       projectsDir,
       ["D:\\Same\\Path", "d:\\same\\path"],
+      [],
       "win32",
     );
     expect(list.length).toBe(1);
+  });
+
+  it("排除清单中的项目不出现在列表里", () => {
+    const projRoot = path.join(base, "p3", "gamma");
+    fs.mkdirSync(projRoot, { recursive: true });
+    const projectsDir = path.join(base, "projects4");
+    fs.mkdirSync(projectsDir);
+    fs.mkdirSync(path.join(projectsDir, mangleProjectPath(projRoot)));
+    const manual = [path.join(base, "p3", "delta")];
+    fs.mkdirSync(manual[0], { recursive: true });
+
+    // 无排除：两项都出现
+    const all = listProjects(projectsDir, manual, [], "win32");
+    expect(all.length).toBe(2);
+    // 排除 gamma（会话扫描来源）后只剩 delta —— 「移除」对扫描来源的项目生效
+    const list = listProjects(
+      projectsDir,
+      manual,
+      [path.join(base, "p3", "gamma")],
+      "win32",
+    );
+    expect(list.length).toBe(1);
+    expect(list[0].path).toBe(manual[0]);
   });
 });

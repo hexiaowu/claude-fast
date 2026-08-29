@@ -7,13 +7,15 @@ export interface Config {
   favorites: string[];
   /** 手动添加的项目路径清单（Claude 会话扫描之外的补充；去脚本化后主列表的一部分） */
   projects: string[];
+  /** 被用户从列表移除的项目路径（会话扫描会重新发现它们，需排除） */
+  excluded: string[];
   dark: boolean;
   /** null = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction: string | null;
 }
 
 export function defaultConfig(): Config {
-  return { favorites: [], projects: [], dark: false, closeAction: null };
+  return { favorites: [], projects: [], excluded: [], dark: false, closeAction: null };
 }
 
 /** 剥离 UTF-8 BOM 后解析 JSON（Windows 编辑器可能带 BOM 写入） */
@@ -40,6 +42,7 @@ function readConfigFile(p: string): Config | null {
   return {
     favorites: Array.isArray(c.favorites) ? c.favorites.map(String) : [],
     projects: Array.isArray(c.projects) ? c.projects.map(String) : [],
+    excluded: Array.isArray(c.excluded) ? c.excluded.map(String) : [],
     dark: c.dark === true,
     closeAction:
       c.closeAction === "quit" || c.closeAction === "minimize" ? c.closeAction : null,

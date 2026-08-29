@@ -264,21 +264,27 @@ function statIsDirectory(p: string): boolean {
   }
 }
 
-/** 构建主列表：Claude 会话扫描 ∪ 手动添加清单（config.projects），按路径去重。
+/** 构建主列表：Claude 会话扫描 ∪ 手动添加清单（config.projects），按路径去重，
+ *  并剔除排除清单（用户已移除）中的项目。
  *  missing = 路径当前不存在（仍显示、标红、不可启动）。 */
 export function listProjects(
   projectsDir: string,
   manualPaths: string[],
+  excludedPaths: string[],
   platform: NodeJS.Platform = process.platform,
 ): ProjectItem[] {
   const p = platform === "win32" ? path.win32 : path.posix;
+  const excluded = new Set(excludedPaths.map((x) => x.toLowerCase()));
   const out = new Map<string, ProjectItem>();
   for (const s of scanClaudeProjects(projectsDir, platform)) {
+    if (excluded.has(s.path.toLowerCase())) {
+      continue; // 用户已移除：即使会话扫描重新发现也不显示
+    }
     out.set(s.path.toLowerCase(), { key: s.path, name: s.name, path: s.path, missing: s.missing });
   }
   for (const mp of manualPaths) {
     const key = mp.toLowerCase();
-    if (out.has(key)) continue;
+    if (out.has(key) || excluded.has(key)) continue;
     out.set(key, {
       key: mp,
       name: p.basename(mp) || mp,

@@ -221,12 +221,13 @@ function createWindow(): void {
 function registerIpc(): void {
   // ---------- 项目清单（去脚本化） ----------
   handle("list_projects", () =>
-    listProjects(projectsDir(), loadConfig(rootDir()).projects));
+    listProjects(projectsDir(), loadConfig(rootDir()).projects, loadConfig(rootDir()).excluded));
   handle("load_config", () => loadConfig(rootDir()));
   handle("save_config", (p) => {
     const cfg: Config = {
       favorites: Array.isArray(p.favorites) ? p.favorites.map(String) : [],
       projects: Array.isArray(p.projects) ? p.projects.map(String) : [],
+      excluded: Array.isArray(p.excluded) ? p.excluded.map(String) : [],
       dark: p.dark === true,
       closeAction:
         p.closeAction === "quit" || p.closeAction === "minimize" ? p.closeAction : null,
@@ -236,13 +237,19 @@ function registerIpc(): void {
   handle("add_project", (p) => {
     const cfg = loadConfig(rootDir());
     cfg.projects = addProject(cfg.projects, String(p.path));
+    // 重新加入 = 解除排除
+    cfg.excluded = cfg.excluded.filter((x) => x.toLowerCase() !== String(p.path).toLowerCase());
     saveConfig(rootDir(), cfg);
   });
   handle("remove_project", (p) => {
     const cfg = loadConfig(rootDir());
     cfg.projects = removeProject(cfg.projects, String(p.path));
     // 收藏里同步移除（列表键已变为项目路径）
-    cfg.favorites = removeProject(cfg.favorites, String(p.path));
+    cfg.favorites = cfg.favorites.filter((f) => f.toLowerCase() !== String(p.path).toLowerCase());
+    // 加入排除清单：会话扫描会重新发现该项目，必须过滤才能让「移除」生效
+    if (!cfg.excluded.some((x) => x.toLowerCase() === String(p.path).toLowerCase())) {
+      cfg.excluded.push(String(p.path));
+    }
     saveConfig(rootDir(), cfg);
   });
   handle("launch_project", (p) => launchProject(String(p.path)));
