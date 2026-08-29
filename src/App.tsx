@@ -30,6 +30,7 @@ interface ConfirmState {
 export default function App() {
   const [items, setItems] = useState<Project[]>([]);
   const [projectDirs, setProjectDirs] = useState<string[]>([]);
+  const [excludedDirs, setExcludedDirs] = useState<string[]>([]);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [dark, setDark] = useState(false);
   const [search, setSearch] = useState("");
@@ -97,7 +98,7 @@ export default function App() {
       setCloseChoiceOpen(false);
       if (remember) {
         setCloseAction(action);
-        await api.saveConfig(favorites, projectDirs, dark, action).catch(() => {});
+        await api.saveConfig(favorites, projectDirs, excludedDirs, dark, action).catch(() => {});
       }
       if (action === "minimize") {
         await getCurrentWindow().hide();
@@ -105,7 +106,7 @@ export default function App() {
         await api.quitApp();
       }
     },
-    [favorites, projectDirs, dark],
+    [favorites, projectDirs, excludedDirs, dark],
   );
 
   // ---------- 数据加载 ----------
@@ -116,6 +117,7 @@ export default function App() {
       setItems(list);
       setFavorites(cfg.favorites ?? []);
       setProjectDirs(cfg.projects ?? []);
+      setExcludedDirs(cfg.excluded ?? []);
       setDark(cfg.dark ?? false);
       setCloseAction(cfg.closeAction ?? null);
       // 选中项可能已被删除，清理
@@ -170,6 +172,7 @@ export default function App() {
         await api.saveConfig(
           favs,
           projectDirs,
+          excludedDirs,
           d,
           ca === undefined ? closeAction : ca,
         );
@@ -177,7 +180,7 @@ export default function App() {
         showToast("保存配置失败：" + String(e));
       }
     },
-    [showToast, closeAction, projectDirs],
+    [showToast, closeAction, projectDirs, excludedDirs],
   );
 
   const toggleFav = useCallback(
