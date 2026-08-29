@@ -1,6 +1,7 @@
 // Electron 主进程：窗口 / 托盘 / 单实例 / 关闭拦截 / 全部 IPC 命令
 // （对齐原 Tauri 后端 lib.rs 的 run() + 22 个 commands）
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "electron";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, saveConfig, type Config } from "./backend/config";
@@ -8,7 +9,7 @@ import { createLauncher, deleteLauncher, listLaunchers } from "./backend/launche
 import {
   checkClaude,
   checkLaunchers,
-  launchClaude,
+  buildResumeCmdline,
   openFolder,
   resumeSession,
   scanClaudeProjects,
@@ -91,6 +92,35 @@ function toInt(v: unknown): number | undefined {
 }
 
 // ---------------- 窗口与托盘 ----------------
+
+/** 启动启动脚本：Windows 直接 spawn `cmd /c "bat"`（不带 detached——DETACHED_PROCESS
+ *  会让控制台脱离默认终端委托，整棵进程树被传统 conhost 各自承载，claude 2.x 的
+ *  bash 探测会弹出多个一闪而过的窗口；不带 detached 时控制台走默认终端委托，
+ *  与 Tauri 版 ShellExecuteW 行为一致，只弹一个窗口）。macOS 用 Terminal.app。 */
+async function launchScript(file: string): Promise<void> {
+  if (process.platform !== "win32") {
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn("open", ["-a", "Terminal", file], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.on("error", (e) => reject(new Error(String(e))));
+      child.once("spawn", () => {
+        child.unref();
+        resolve();
+      });
+    });
+  }
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/c", `"${file}"`], {
+      cwd: rootDir(),
+      windowsVerbatimArguments: true,
+      stdio: "ignore",
+    });
+    child.on("error", (e) => reject(new Error(String(e))));
+    child.once("spawn", () => resolve());
+  });
+}
 
 function appIcon(): { app: string; tray: string } {
   // nativeImage 不能从 asar 内读图——打包后图标放 extraResources（resources/），
@@ -197,7 +227,7 @@ function registerIpc(): void {
   });
   handle("create_launcher", (p) => createLauncher(rootDir(), String(p.dir)));
   handle("delete_launcher", (p) => deleteLauncher(String(p.file)));
-  handle("launch_claude", (p) => launchClaude(String(p.file), rootDir()));
+  handle("launch_claude", (p) => launchScript(String(p.file)));
   handle("open_folder", (p) => openFolder(String(p.path)));
   handle("check_claude", () => checkClaude());
   handle("check_launchers", (p) =>
@@ -226,8 +256,26 @@ function registerIpc(): void {
   handle("purge_trash", () => purgeTrashIn(trashRootDir()));
   handle("get_session_messages", (p) =>
     getSessionMessages(String(p.file), projectsDir(), toInt(p.offset)));
-  handle("resume_session", (p) =>
-    resumeSession(String(p.file), String(p.projectPath), projectsDir()));
+  handle("resume_session", (p) => {
+    const file = String(p.file);
+    const projectPath = String(p.projectPath);
+    if (process.platform === "win32") {
+      // Windows：与 launch 同款——spawn cmd（不带 detached，控制台走默认终端
+      // 委托），cmdline 形如 `/k cd /d "..." && claude --resume <id>`
+      const { sessionId } = validateSessionFile(file, projectsDir());
+      const cmdline = buildResumeCmdline(projectPath, sessionId);
+      const child = spawn("cmd.exe", [cmdline], {
+        cwd: projectPath.trim(),
+        windowsVerbatimArguments: true,
+        stdio: "ignore",
+      });
+      return new Promise<void>((resolve, reject) => {
+        child.on("error", (e) => reject(new Error(String(e))));
+        child.once("spawn", () => resolve());
+      });
+    }
+    return resumeSession(file, projectPath, projectsDir());
+  });
 
   // ---------- 其他 ----------
   handle("get_data_root", () => {

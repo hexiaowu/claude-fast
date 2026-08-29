@@ -93,37 +93,6 @@ export async function checkLaunchers(paths: string[]): Promise<boolean[]> {
   );
 }
 
-/** 启动 claude：Windows 用 `cmd /c "<script>"` 新开控制台（等效双击脚本，
- *  windowsVerbatimArguments 保证引号按 cmd 规则传递）；macOS 用 Terminal.app 打开。 */
-export function launchClaude(
-  file: string,
-  root: string,
-  platform: NodeJS.Platform = process.platform,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let child: ChildProcess;
-    if (platform === "win32") {
-      child = spawn("cmd.exe", ["/c", `"${file}"`], {
-        cwd: root,
-        detached: true,
-        windowsVerbatimArguments: true,
-        stdio: "ignore",
-      });
-    } else {
-      child = spawn("open", ["-a", "Terminal", file], {
-        detached: true,
-        stdio: "ignore",
-      });
-    }
-    child.on("error", (e) => reject(new Error(String(e))));
-    // spawn 成功（进程已创建）即视为启动成功，不等脚本执行结束
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  });
-}
-
 /** 校验 resume 的项目路径（防命令注入，两平台共用）：
  *  空路径拒绝；控制字符一律拒绝；路径必须真实存在。
  *  Windows：cmd 引号较弱，`%VAR%` `^` `& | < > ( )` 等即使双引号内仍有作用，故显式拒绝。
