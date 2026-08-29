@@ -1,23 +1,22 @@
-import { useEffect, useRef } from "react";
-import type { Launcher } from "../types";
+﻿import { useEffect, useRef } from "react";
+import type { Project } from "../types";
 
 interface Props {
   x: number;
   y: number;
-  launcher: Launcher | null;
+  project: Project | null;
   favorites: string[];
   onClose: () => void;
   onToggleFav: (key: string) => void;
-  onOpenFolder: (l: Launcher) => void;
-  onCopyPath: (l: Launcher) => void;
-  onRemove: (l: Launcher) => void;
+  onOpenFolder: (l: Project) => void;
+  onCopyPath: (l: Project) => void;
+  onRemove: (l: Project) => void;
   onHealth: () => void;
 }
 
 export default function ContextMenu({
   x,
-  y,
-  launcher,
+  y,    project,
   favorites,
   onClose,
   onToggleFav,
@@ -49,29 +48,29 @@ export default function ContextMenu({
     top: Math.min(y, window.innerHeight - 260),
   };
 
-  const isFav = launcher ? favorites.includes(launcher.key) : false;
+  const isFav = project ? favorites.includes(project.key) : false;
 
   return (
     <div className="context-menu" ref={ref} style={style}>
-      {launcher && (
+      {project && (
         <>
           <div className="context-title">
-            {launcher.label}
-            {launcher.healthy === false && <span className="tag tag-danger">失效</span>}
+            {project.name}
+            {project.healthy === false && <span className="tag tag-danger">失效</span>}
           </div>
           <div className="context-sep" />
-          <button className="context-item" onClick={() => { onToggleFav(launcher.key); onClose(); }}>
+          <button className="context-item" onClick={() => { onToggleFav(project.key); onClose(); }}>
             {isFav ? "☆ 取消收藏" : "★ 收藏（置顶）"}
           </button>
-          <button className="context-item" onClick={() => { onOpenFolder(launcher); onClose(); }}>
+          <button className="context-item" onClick={() => { onOpenFolder(project); onClose(); }}>
             打开所在文件夹
           </button>
-          <button className="context-item" onClick={() => { onCopyPath(launcher); onClose(); }}>
+          <button className="context-item" onClick={() => { onCopyPath(project); onClose(); }}>
             复制路径
           </button>
           <div className="context-sep" />
-          <button className="context-item context-danger" onClick={() => { onRemove(launcher); onClose(); }}>
-                        {launcher.healthy === false ? "✗ 移除（目录已失效）" : "移除启动脚本"}
+          <button className="context-item context-danger" onClick={() => { onRemove(project); onClose(); }}>
+                        {project.healthy === false ? "✗ 移除（目录已失效）" : "从列表移除"}
           </button>
           <div className="context-sep" />
         </>

@@ -3,23 +3,26 @@
 一键在项目目录启动 Claude Code 的桌面应用：**Tauri 2 + React + TypeScript（前端）+ Rust（后端）**，Windows + macOS 双平台，不限定工作区目录。
 
 > **版本线**：仓库已重新规划，当前全部代码为 **v1.0.0**（`package.json` / `Cargo.toml` / `tauri.conf.json` 三处版本号一致）。历史上的 PowerShell/WinForms 版与 v2.x/v3.x 旧版号均已作废，代码中不要再按旧版本号理解。
+>
+> **去脚本化（重要）**：项目清单为**路径模型**——`config.json` 的 `favorites`/`projects` 存的都是**项目绝对路径**（不再是脚本名），`+` 号启动直接 `cmd /k cd /d "项目" && claude`，**不再生成/执行 scripts/ 启动脚本**。旧版脚本在首次启动时被自动解析迁移（`ensure_projects_migrated`，幂等）。项目列表 = Claude 会话目录扫描（unmangle 反解）∪ config.projects 手动清单。
 
 ## 核心文件
 
 | 文件 | 作用 |
 |---|---|
-| `src/` | 前端：React + TypeScript + Vite。`App.tsx` 状态管理；`src/components/` 15 个 UI 组件（对话框/列表/会话查看器等）；`src/lib/api.ts` 封装全部 Tauri invoke |
-| `src-tauri/` | 后端：Tauri 2 + Rust。**全部 22 个 commands 与 61 个单元测试都在 `src-tauri/src/lib.rs`**（约 2800 行，`#[cfg(test)]`） |
+| `src/` | 前端：React + TypeScript + Vite。`App.tsx` 状态管理；`src/components/` UI 组件（对话框/列表/会话查看器等）；`src/lib/api.ts` 封装全部 Tauri invoke |
+| `src-tauri/src/lib.rs` | 后端：**全部 commands 与单元测试都在此**（约 2800 行，`#[cfg(test)]`）。项目清单系：`list_projects`/`add_project`/`remove_project`/`launch_project`/`check_projects`；一次性迁移：`ensure_projects_migrated` |
 | `README.md` | 使用说明、构建方法 |
 
 > 本目录为**纯源码库**（与 GitHub 仓库一致）：不含 exe、scripts、config.json——这些运行时产物/用户数据都在数据根目录（见「数据根目录」）。
 
-## 启动脚本约定
+## 启动与项目清单（去脚本化）
 
-- 每个 `claude-*.bat`（Windows）/ `claude-*.sh`（macOS）内容固定：`cd` 到项目路径 → 检查 `claude` 命令 → 启动 `claude`，统一生成到数据根 `scripts/`。
-- Windows **必须写 `call claude` 而不是 `claude`**：`claude` 是 `claude.cmd` shim，批处理调用其他 .cmd 不加 `call` 时 cmd 不返回，错误处理不执行。bat 约定：UTF-8 编码、CRLF 换行、`chcp 65001` 后输出中文、出错 `pause` 保留窗口。
-- macOS `.sh` 模板（`gen_sh`）：`#!/bin/bash` + `fail()` 函数（提示+等回车）+ `cd "/路径" || fail` + `command -v claude` 检查 `|| fail` + `exec claude`；路径经 `sh_quote` 转义（`\` `"` `$` 反引号）防注入；写脚本后自动 `chmod +x`。
-- 脚本里的目录路径是**绝对路径**（项目移动后需同步修改脚本）。
+- **不再生成/执行启动脚本**：`+` 号启动直接新开终端执行 `cmd /k cd /d "项目路径" && claude`（Windows ShellExecuteW；macOS 临时 sh + Terminal.app），claude 退出后窗口保留。
+- 项目列表 = **Claude 会话目录扫描**（`~/.claude/projects` unmangle 反解）∪ `config.projects`（手动添加的项目路径），按路径去重；收藏（favorites）存项目绝对路径。
+- 「移除」= 从清单移除项目（不删磁盘文件）；「批量添加」= 把扫描到的项目加入清单。
+- 旧版启动脚本（`scripts/claude-*.bat|sh`）在首次启动时被 `ensure_projects_migrated` 自动解析迁移（key → 路径），脚本文件保留在磁盘不自动删除。
+- 健康检查（`check_projects`）直接检查项目路径是否存在。
 
 ## 跨平台层
 
@@ -38,7 +41,7 @@
 
 - **收藏置顶**（`favorites`）：点星标或右键收藏，金色置顶。已收藏项可**整行拖拽排序**（顺序即 `favorites` 数组顺序，松手后复用 `save_config` 落盘；按 key 重排非索引，失效 key 原位保留；搜索过滤期间禁用拖拽；未收藏行不可拖拽）。前端用原生 HTML5 DnD——**`tauri.conf.json` 的 `dragDropEnabled: false` 是前提**（默认 true 时 Windows 上 WebView2 的 OLE 拖放处理会拦截页面内 dragover/drop，勿当冗余配置删掉）。
 - **健康检查不阻塞启动**：`list_launchers` 只解析脚本内容不做目录 stat（秒返回）；前端渲染后异步调 `check_launchers` 并行检查，失效目录自动标红；「健康检查」对话框打开时现场重新检查。
-- **批量添加**：扫描 Claude Code 项目目录，`unmangle_candidates` 反解出真实路径并验证存在性，失效项目（`missing`）不参与生成。命名**无工作区概念**：任何路径统一用叶子目录名（如 `myapp` → `claude-myapp.bat`）；同名自动加序号（`claude-myapp-2.bat`，`pick_unique_script_path`），**绝不覆盖**其他项目的脚本。
+- **批量添加**：扫描 Claude Code 项目目录，`unmangle_candidates` 反解出真实路径并验证存在性，失效项目（`missing`）不参与添加；已在清单中的项目标记跳过。清单存**项目绝对路径**于 `config.projects`。
 - **会话管理**：点击项目行展开其 Claude Code 会话列表（异步加载不阻塞 UI）；会话行显示标题 + 相对时间 + 摘要，悬停出现 ✎ 重命名、🗑 删除。`list_sessions(project_path)` 用真实路径正向 mangle 定位 `<projects>/<mangled>/`，对每个 `.jsonl` 只读首尾各 64KB（`LITE_READ_BUF_SIZE`）提取元数据：标题回退链 customTitle > aiTitle > 首条用户消息；**命令消息（如 `/init`）被跳过——只执行命令、无实质对话的会话不进列表**；sidechain/纯元数据会话过滤；按 mtime 倒序。`rename_session(file, new_title)` 安全校验（限 projects 目录下 uuid.jsonl）后向 jsonl **追加** `custom-title` 行（与 Claude Code `/rename` 同机制，不覆盖原文件）。
 - **回收站（删除 = 移入回收站）**：`delete_session` 先备份到数据根 `trash/sessions/<时间戳>/<项目>/` 再删除；「🗑 回收站」对话框可 `restore_session` 恢复（移回原目录，Claude Code 可继续 resume）或 `purge_session` / `purge_trash` 永久删除（行内二次确认）。
 - **会话内容查看**：左右分栏（左 320px 项目/会话列表，右内容区）。`get_session_messages(file)` 全量读 jsonl 提取 user/assistant 消息（text/thinking/tool_use/tool_result 块，`MAX_SESSION_MESSAGES=500` 截断，过滤 sidechain/isMeta/命令消息），前端聊天式渲染（思考/工具调用/工具结果 `<details>` 折叠、围栏代码块等宽）。

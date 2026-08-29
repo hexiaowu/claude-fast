@@ -34,30 +34,31 @@ fn legacy_marker() -> String {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct Launcher {
-    label: String,
-    path: Option<String>,
-    file: String,
+pub struct ProjectItem {
+    /// 唯一键 = 项目绝对路径
     key: String,
-    // healthy 不在 list_launchers 中计算（避免启动时阻塞在目录检查上），
-    // 由前端调用 check_launchers 异步获取后回填。
+    /// 叶子目录名（显示用）
+    name: String,
+    /// 项目绝对路径
+    path: String,
+    /// true = 路径当前不存在（标红、不可启动）
+    missing: bool,
+    // healthy 不在 list_projects 中计算（避免启动时阻塞在目录检查上），
+    // 由前端调用 check_projects 异步获取后回填。
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// 收藏的项目绝对路径（置顶）
     favorites: Vec<String>,
+    /// 手动添加的项目路径清单（Claude 会话扫描之外的补充）
+    #[serde(default)]
+    projects: Vec<String>,
     dark: bool,
     /// 关闭窗口行为：None=每次询问；Some("quit")=直接退出；Some("minimize")=最小化到托盘
     #[serde(default)]
     close_action: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateResult {
-    file: String,
-    existed: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -76,8 +77,6 @@ pub struct ClaudeProject {
     path: String,
     /// true = 真实路径已不存在（项目代码被删除）
     missing: bool,
-    /// true = 数据根 scripts/ 下已有该项目的启动脚本
-    existing: bool,
 }
 
 /// 会话元数据（从 jsonl 的 head/tail 轻量提取，不读全文件）
@@ -190,11 +189,6 @@ fn resolve_root_dir() -> PathBuf {
     app
 }
 
-/// 启动脚本目录（数据根下）
-fn scripts_dir() -> PathBuf {
-    resolve_root_dir().join(SCRIPTS_DIR)
-}
-
 fn strip_bom(bytes: &[u8]) -> &[u8] {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &bytes[3..]
@@ -239,47 +233,183 @@ fn parse_cd_path(content: &str) -> Option<String> {
 
 // ---------------- commands ----------------
 
-#[tauri::command]
-fn list_launchers() -> Vec<Launcher> {
-    let mut files: Vec<PathBuf> = fs::read_dir(scripts_dir())
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| {
-                    p.is_file()
-                        && p.extension()
-                            .map(|e| e.eq_ignore_ascii_case(script_ext()))
-                            .unwrap_or(false)
-                        && p.file_stem()
-                            .map(|s| s.to_string_lossy().to_lowercase().starts_with("claude-"))
-                            .unwrap_or(false)
-                })
+// ---------------- 项目清单（去脚本化） ----------------
+
+fn stat_is_dir(p: &str) -> bool {
+    Path::new(p).is_dir()
+}
+
+/// 构建主列表：Claude 会话扫描 ∪ config.projects 手动清单，按路径去重。
+/// missing = 路径当前不存在（仍显示、标红、不可启动）。
+fn list_projects_impl(projects_dir: &Path, manual: &[String]) -> Vec<ProjectItem> {
+    let mut out: Vec<ProjectItem> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let push = |item: ProjectItem, out: &mut Vec<ProjectItem>, seen: &mut Vec<String>| {
+        let key = item.key.to_lowercase();
+        if !seen.iter().any(|s| *s == key) {
+            seen.push(key);
+            out.push(item);
+        }
+    };
+    for s in scan_claude_projects_blocking(projects_dir) {
+        push(
+            ProjectItem {
+                key: s.path.clone(),
+                name: s.name.clone(),
+                path: s.path,
+                missing: s.missing,
+            },
+            &mut out,
+            &mut seen,
+        );
+    }
+    for mp in manual {
+        let name = Path::new(mp)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| mp.clone());
+        push(
+            ProjectItem {
+                key: mp.clone(),
+                name,
+                path: mp.clone(),
+                missing: !stat_is_dir(mp),
+            },
+            &mut out,
+            &mut seen,
+        );
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// 把一个项目路径加入手动清单（已在清单中则原样返回）。路径必须是存在的目录。
+fn add_project_to(manual: &mut Vec<String>, dir: &str) {
+    if !stat_is_dir(dir) {
+        return;
+    }
+    if !manual.iter().any(|p| p.eq_ignore_ascii_case(dir)) {
+        manual.push(dir.to_string());
+    }
+}
+
+/// 从手动清单移除项目路径（收藏同步移除由调用方处理）
+fn remove_project_from(manual: &mut Vec<String>, dir: &str) {
+    manual.retain(|p| !p.eq_ignore_ascii_case(dir));
+}
+
+/// 解析数据根 scripts/ 下旧启动脚本（Tauri 版遗留）→ 脚本 stem → cd 路径。
+/// 用于去脚本化的一次性迁移；脚本文件本身保留不动。
+fn legacy_script_paths(scripts: &Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(entries) = fs::read_dir(scripts) else {
+        return map;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !stem.to_lowercase().starts_with("claude-") {
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext != script_ext() {
+            continue;
+        }
+        if let Some(cd) = parse_cd_path(&fs::read_to_string(&p).unwrap_or_default()) {
+            map.insert(stem.to_string(), cd);
+        }
+    }
+    map
+}
+
+/// 旧脚本清单一次性迁移（去脚本化）：解析旧脚本的 cd 路径完成 key → 项目路径映射：
+///   projects  = 全部脚本指向的项目路径
+///   favorites = 旧收藏 key 映射后的项目路径（找不到的丢弃）
+/// 判定：config.json 原始内容含 "projects" 字段（或无 config 文件）即视为已迁移。
+fn ensure_projects_migrated() {
+    ensure_projects_migrated_in(&resolve_root_dir());
+}
+
+fn ensure_projects_migrated_in(root: &Path) {
+    let cfg_path = root.join("config.json");
+    let Ok(text) = fs::read_to_string(&cfg_path) else {
+        return; // 无 config（全新安装）
+    };
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if raw.get("projects").is_some() {
+        return; // 已迁移
+    }
+    let key_to_path = legacy_script_paths(&root.join(SCRIPTS_DIR));
+    let legacy_favs: Vec<String> = raw
+        .get("favorites")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         })
         .unwrap_or_default();
-    files.sort();
-
-    files
-        .into_iter()
-        .map(|f| {
-            let key = f.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let label = key.strip_prefix("claude-").unwrap_or(&key).to_string();
-            let content = fs::read_to_string(&f).unwrap_or_default();
-            let path = parse_cd_path(&content);
-            Launcher {
-                label,
-                path,
-                file: f.to_string_lossy().to_string(),
-                key,
+    let cfg = load_config_from(root);
+    let mut projects: Vec<String> = Vec::new();
+    for p in key_to_path.values() {
+        if !projects.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+            projects.push(p.clone());
+        }
+    }
+    let mut favorites: Vec<String> = Vec::new();
+    for k in legacy_favs {
+        if let Some(p) = key_to_path.get(&k) {
+            if !favorites.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                favorites.push(p.clone());
             }
-        })
-        .collect()
+        }
+    }
+    let _ = save_config_to(root, favorites, projects, cfg.dark, cfg.close_action);
+}
+
+#[tauri::command]
+fn list_projects() -> Vec<ProjectItem> {
+    let cfg = load_config();
+    list_projects_impl(&claude_projects_dir(), &cfg.projects)
+}
+
+#[tauri::command]
+fn add_project(path: String) -> Result<(), String> {
+    let mut cfg = load_config();
+    if !stat_is_dir(&path) {
+        return Err("路径不存在或不是文件夹".to_string());
+    }
+    add_project_to(&mut cfg.projects, &path);
+    save_config(cfg.favorites.clone(), cfg.projects.clone(), cfg.dark, cfg.close_action.clone())
+}
+
+#[tauri::command]
+fn remove_project(path: String) -> Result<(), String> {
+    let mut cfg = load_config();
+    remove_project_from(&mut cfg.projects, &path);
+    // 收藏里同步移除（列表键已变为项目路径）
+    remove_project_from(&mut cfg.favorites, &path);
+    save_config(cfg.favorites.clone(), cfg.projects.clone(), cfg.dark, cfg.close_action.clone())
 }
 
 /// 读取配置：主文件损坏时自动回退到 .bak 并恢复主文件（收藏不丢失）
 #[tauri::command]
 fn load_config() -> Config {
-    let root = resolve_root_dir();
+    load_config_from(&resolve_root_dir())
+}
+
+fn load_config_from(root: &Path) -> Config {
     let cfg_path = root.join("config.json");
     let bak_path = root.join("config.json.bak");
     if let Some(c) = read_config_file(&cfg_path) {
@@ -296,12 +426,29 @@ fn load_config() -> Config {
 #[tauri::command]
 fn save_config(
     favorites: Vec<String>,
+    projects: Vec<String>,
     dark: bool,
     close_action: Option<String>,
 ) -> Result<(), String> {
-    let root = resolve_root_dir();
+    save_config_to(
+        &resolve_root_dir(),
+        favorites,
+        projects,
+        dark,
+        close_action,
+    )
+}
+
+fn save_config_to(
+    root: &Path,
+    favorites: Vec<String>,
+    projects: Vec<String>,
+    dark: bool,
+    close_action: Option<String>,
+) -> Result<(), String> {
     let cfg = Config {
         favorites,
+        projects,
         dark,
         close_action,
     };
@@ -317,47 +464,77 @@ fn save_config(
     Ok(())
 }
 
-/// 生成启动脚本文件名：统一用**叶子目录名**（无工作区概念，跨平台一致）：
-///   D:\MyWorkspaces\yaotu\tdc      → claude-tdc.bat
-///   D:\WeChatProjects\tms_app      → claude-tms_app.bat
-///   D:\baitai                      → claude-baitai.bat
-///   /Users/me/proj                 → claude-proj.sh
-/// 同名叶子目录（如两个 myproj）由 create_launcher 里的
-/// pick_unique_script_path 加序号区分（claude-myproj-2.bat），不会互相覆盖。
-fn build_script_name(dir: &str) -> String {
-    // 叶子目录名（Path::file_name 忽略尾部斜杠，如 D:\MyWorkspaces\ → MyWorkspaces）
-    let leaf = Path::new(dir)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let safe: String = leaf
-        .chars()
-        .map(|c| if "\\/:*?\"<>|".contains(c) { '-' } else { c })
-        .collect();
-    let safe = safe.trim_matches('-').to_string();
-    let safe = if safe.is_empty() { "project".to_string() } else { safe };
-    format!("claude-{}.{}", safe, script_ext())
-}
-
-/// 在 scripts 目录下为 dir 挑选不冲突的脚本文件名：
-/// 基础名 claude-<leaf>.<ext> 已被**其他路径**的脚本占用时依次加序号
-/// （claude-<leaf>-2.bat、-3.bat…）。指向 dir 的已有脚本会由
-/// find_existing_script 复用，不会走到这里。
-fn pick_unique_script_path(scripts: &Path, dir: &str) -> PathBuf {
-    let base = build_script_name(dir);
-    let stem = base.trim_end_matches(script_ext()).trim_end_matches('.');
-    let mut p = scripts.join(&base);
-    let mut n = 2;
-    while p.exists() {
-        p = scripts.join(format!("{stem}-{n}.{}", script_ext()));
-        n += 1;
+/// 启动项目（新会话）：新开终端，cd 到项目目录运行 claude。
+/// 不经过任何脚本文件；Windows ShellExecuteW 启动 `cmd /k cd /d "dir" && claude`
+/// （默认终端委托，整树同一控制台会话）；macOS 临时 sh + Terminal.app。
+#[tauri::command]
+fn launch_project(path: String) -> Result<(), String> {
+    let dir = path.trim().to_string();
+    if !Path::new(&dir).is_dir() {
+        return Err("项目路径不存在".to_string());
     }
-    p
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
+
+        // /k 让 claude 退出后窗口保留、便于查看输出
+        let cmdline = format!("/k cd /d \"{dir}\" && claude");
+        let exe: Vec<u16> = "cmd.exe".encode_utf16().chain(Some(0)).collect();
+        let params: Vec<u16> = cmdline.encode_utf16().chain(Some(0)).collect();
+        let wd: Vec<u16> = dir.encode_utf16().chain(Some(0)).collect();
+        let res = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                exe.as_ptr(),
+                params.as_ptr(),
+                wd.as_ptr(),
+                SW_SHOW,
+            )
+        };
+        if res as isize > 32 {
+            Ok(())
+        } else {
+            Err(format!("启动失败（ShellExecute 返回 {}）", res as isize))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // macOS：临时 sh + Terminal.app（无需 osascript 自动化权限）
+        let sh = std::env::temp_dir().join(format!(
+            "claude-fast-open-{}-{}.sh",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        fs::write(
+            &sh,
+            format!(
+                "#!/bin/bash\ncd {} || exit 1\nexec claude\n",
+                sh_quote(&dir)
+            ),
+        )
+        .map_err(|e| format!("写入临时脚本失败：{e}"))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sh, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("设置临时脚本权限失败：{e}"))?;
+        Command::new("open")
+            .args(["-a", "Terminal"])
+            .arg(&sh)
+            .spawn()
+            .map_err(|e| format!("启动 Terminal 失败：{e}"))?;
+        Ok(())
+    }
 }
 
-/// shell 双引号内转义（macOS 脚本模板用：路径可能含 `"`、`$`、反引号、`\`，
+// ---------------- 会话继续对话（v2.0.0 阶段二：方向 B resume） ----------------
+
+/// shell 双引号内转义（macOS 命令行拼装用：路径可能含 `"`、`$`、反引号、`\`，
 /// 转义后放入 `cd "..."` 不会被展开/截断）。
-/// Windows 构建中仅被测试引用（macOS 构建中由 gen_sh 使用）。
+/// Windows 构建中仅被 macOS 专属代码引用（launch_project 的非 windows 分支）。
 #[allow(dead_code)]
 fn sh_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -370,163 +547,6 @@ fn sh_quote(s: &str) -> String {
     out
 }
 
-/// 与旧版 PowerShell 完全一致的 bat 模板（Windows）
-fn gen_bat(dir: &str, leaf: &str) -> String {
-    format!(
-        "@echo off\r\nchcp 65001 >nul\r\ntitle Claude Code - {leaf}\r\n\
-         cd /d \"{dir}\" || goto :err\r\nwhere claude >nul 2>nul || goto :err\r\n\
-         call claude\r\nif errorlevel 1 goto :err\r\nexit /b 0\r\n\
-         :err\r\necho [错误] 启动失败：目录不存在或 claude 命令未找到。\r\npause\r\n"
-    )
-}
-
-/// macOS 启动脚本模板：Terminal 打开后 cd 到项目目录并启动 claude；
-/// claude 不存在或目录失效时提示并等待回车（窗口保留，不闪退）。
-/// Windows 构建中仅被测试引用（macOS 构建中由 gen_script 使用）。
-#[allow(dead_code)]
-fn gen_sh(dir: &str, leaf: &str) -> String {
-    // 目录失效与 claude 缺失都走 fail()：提示 + 等回车，窗口保留不闪退（与 gen_bat 的 :err 对齐）
-    format!(
-        "#!/bin/bash\n# Claude Code - {leaf}\n\
-         fail() {{ echo \"[错误] 启动失败：目录不存在或 claude 命令未找到。\"; read -r -p \"按回车键关闭窗口...\" _; exit 1; }}\n\
-         cd \"{}\" || fail\n\
-         command -v claude >/dev/null 2>&1 || fail\n\
-         exec claude\n",
-        sh_quote(dir)
-    )
-}
-
-/// 当前平台生成启动脚本内容（Windows: .bat；macOS: .sh）
-fn gen_script(dir: &str, leaf: &str) -> String {
-    #[cfg(windows)]
-    {
-        gen_bat(dir, leaf)
-    }
-    #[cfg(not(windows))]
-    {
-        gen_sh(dir, leaf)
-    }
-}
-
-/// 在数据根 scripts/ 下查找指向该路径的启动脚本文件（按脚本内 cd 路径比对，忽略大小写）。
-/// 返回已有文件的路径——查重与「创建时复用」共用此逻辑，保证两处判定一致。
-fn find_existing_script(path: &str) -> Option<PathBuf> {
-    let scripts = scripts_dir();
-    let Ok(entries) = fs::read_dir(&scripts) else {
-        return None;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_file()
-            && p.extension()
-                .map(|x| x.eq_ignore_ascii_case(script_ext()))
-                .unwrap_or(false)
-            && parse_cd_path(&fs::read_to_string(&p).unwrap_or_default())
-                .map(|cd| cd.eq_ignore_ascii_case(path))
-                .unwrap_or(false)
-        {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// 判断数据根 scripts/ 下是否已有指向该路径的启动脚本
-fn scripts_has_project(path: &str) -> bool {
-    find_existing_script(path).is_some()
-}
-
-#[tauri::command]
-fn create_launcher(dir: String) -> Result<CreateResult, String> {
-    let dir_path = Path::new(&dir);
-    if !dir_path.is_dir() {
-        return Err("路径不存在或不是文件夹".to_string());
-    }
-    let scripts = scripts_dir();
-    fs::create_dir_all(&scripts).map_err(|e| e.to_string())?;
-    // 已存在指向该路径的脚本时复用其文件（保持文件名，只更新内容），
-    // 避免新命名规则与旧脚本重名/重复生成；否则新建，同名叶子被其他路径
-    // 占用时自动加序号（claude-<leaf>-2.bat），绝不覆盖别的项目脚本
-    let script_path = find_existing_script(&dir)
-        .unwrap_or_else(|| pick_unique_script_path(&scripts, &dir));
-    let existed = find_existing_script(&dir).is_some();
-    let leaf = dir_path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    fs::write(&script_path, gen_script(&dir, &leaf)).map_err(|e| e.to_string())?;
-    // macOS：脚本需可执行权限（Terminal 打开 .sh 直接运行）
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败：{e}"))?;
-    }
-    Ok(CreateResult {
-        file: script_path.to_string_lossy().to_string(),
-        existed,
-    })
-}
-
-#[tauri::command]
-fn delete_launcher(file: String) -> Result<(), String> {
-    let p = Path::new(&file);
-    if p.exists() {
-        fs::remove_file(p).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// Windows：用 ShellExecuteW 打开 cmd 执行脚本（等效双击，stdio 正确连接新控制台）。
-/// 不能再用 `Command::new("cmd").args(["/c", "\"path\""])`：Rust 的 args 在 Windows 上
-/// 会按 CommandLineToArgvW 规则把引号转义成 `\"`，而 cmd 不认 `\"` 转义，
-/// 会把 `\"path\"` 当命令名报「不是内部或外部命令」秒退（窗口一闪而过）。
-#[cfg(windows)]
-fn launch_script_impl(file: &str) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
-
-    let root = resolve_root_dir();
-    let cmdline = format!("/c \"{file}\"");
-    let exe: Vec<u16> = "cmd.exe".encode_utf16().chain(Some(0)).collect();
-    let params: Vec<u16> = cmdline.encode_utf16().chain(Some(0)).collect();
-    let dir: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-    let res = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            exe.as_ptr(),
-            params.as_ptr(),
-            dir.as_ptr(),
-            SW_SHOW,
-        )
-    };
-    if res as isize > 32 {
-        Ok(())
-    } else {
-        Err(format!("启动失败（ShellExecute 返回 {}）", res as isize))
-    }
-}
-
-/// macOS：用 Terminal.app 打开启动脚本（`open -a Terminal <script>`）。
-/// 脚本带 shebang 且已 chmod +x，Terminal 会直接运行它；启动失败（目录失效/claude 缺失）时 fail() 提示并等回车，窗口保留。
-#[cfg(not(windows))]
-fn launch_script_impl(file: &str) -> Result<(), String> {
-    Command::new("open")
-        .args(["-a", "Terminal"])
-        .arg(file)
-        .spawn()
-        .map_err(|e| format!("启动 Terminal 失败：{e}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn launch_claude(file: String) -> Result<(), String> {
-    launch_script_impl(&file)
-}
-
-// ---------------- 会话继续对话（v2.0.0 阶段二：方向 B resume） ----------------
 
 /// 校验 resume 的项目路径（防命令注入，两平台共用）：
 /// 空路径拒绝；控制字符一律拒绝；路径必须真实存在。
@@ -689,10 +709,10 @@ async fn check_claude() -> bool {
     .unwrap_or(false)
 }
 
-/// 健康检查：并行检查各启动脚本指向的目录是否存在（在阻塞线程池中执行，
+/// 健康检查：并行检查各项目路径是否存在（在阻塞线程池中执行，
 /// 不阻塞主线程/UI；某个路径卡住时其余结果不受影响）
 #[tauri::command]
-async fn check_launchers(paths: Vec<String>) -> Vec<bool> {
+async fn check_projects(paths: Vec<String>) -> Vec<bool> {
     let mut tasks = Vec::with_capacity(paths.len());
     for p in paths {
         tasks.push(tauri::async_runtime::spawn_blocking(move || {
@@ -1689,44 +1709,47 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// 批量添加：扫描 Claude Code 项目目录（~/.claude/projects），把每个 mangled 目录名
-/// 反向解析出真实路径；真实路径已不存在的项目标记 missing=true（不参与生成）；
-/// 已有启动脚本的项目标记 existing=true（列表标记、默认不勾选）。
+/// 批量扫描核心（同步）：扫描 Claude Code 项目目录（~/.claude/projects），
+/// 把每个 mangled 目录名反向解析出真实路径；真实路径已不存在的项目
+/// 标记 missing=true。list_projects_impl 与批量添加共用。
+fn scan_claude_projects_blocking(projects_dir: &Path) -> Vec<ClaudeProject> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(projects_dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !e.path().is_dir() {
+            continue;
+        }
+        let cands = unmangle_candidates(&name);
+        let existing = cands.iter().find(|c| Path::new(c).is_dir());
+        let path = existing.cloned().unwrap_or_else(|| {
+            cands.first().cloned().unwrap_or_default()
+        });
+        if path.is_empty() {
+            continue;
+        }
+        let leaf = Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.clone());
+        out.push(ClaudeProject {
+            name: leaf,
+            missing: existing.is_none(),
+            path,
+        });
+    }
+    out.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    out
+}
+
+/// 批量添加：扫描 Claude Code 项目目录（~/.claude/projects）供批量加入清单。
 /// 在阻塞线程池中执行，避免冻结 UI。
 #[tauri::command]
 async fn scan_claude_projects() -> Vec<ClaudeProject> {
     tauri::async_runtime::spawn_blocking(|| {
-        let dir = claude_projects_dir();
-        let mut out = Vec::new();
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return out;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !e.path().is_dir() {
-                continue;
-            }
-            let cands = unmangle_candidates(&name);
-            let existing = cands.iter().find(|c| Path::new(c).is_dir());
-            let path = existing.cloned().unwrap_or_else(|| {
-                cands.first().cloned().unwrap_or_default()
-            });
-            if path.is_empty() {
-                continue;
-            }
-            let leaf = Path::new(&path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| name.clone());
-            out.push(ClaudeProject {
-                name: leaf,
-                missing: existing.is_none(),
-                existing: scripts_has_project(&path),
-                path,
-            });
-        }
-        out.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
-        out
+        scan_claude_projects_blocking(&claude_projects_dir())
     })
     .await
     .unwrap_or_default()
@@ -1823,91 +1846,6 @@ mod tests {
         b.extend_from_slice(b"{\"a\":1}");
         let c: serde_json::Value = serde_json::from_slice(strip_bom(&b)).unwrap();
         assert_eq!(c["a"], 1);
-    }
-
-    #[test]
-    fn bat_name_uses_leaf_name() {
-        // 统一叶子目录名（无工作区概念）：任何路径都取叶子
-        assert_eq!(
-            build_script_name("D:\\MyWorkspaces\\yaotu\\tdc"),
-            "claude-tdc.bat"
-        );
-        assert_eq!(
-            build_script_name("D:\\MyWorkspaces\\proj a\\sub"),
-            "claude-sub.bat"
-        );
-        assert_eq!(
-            build_script_name("D:\\WeChatProjects\\tms_app"),
-            "claude-tms_app.bat"
-        );
-        assert_eq!(
-            build_script_name("C:\\Users\\me\\stuff\\myproj"),
-            "claude-myproj.bat"
-        );
-        assert_eq!(build_script_name("D:\\baitai"), "claude-baitai.bat");
-    }
-
-    #[test]
-    fn bat_name_safe_chars() {
-        assert_eq!(
-            build_script_name("D:\\MyWorkspaces\\a:b\\c<d"),
-            "claude-c-d.bat"
-        );
-        // 尾部斜杠：叶子取 MyWorkspaces（Path::file_name 忽略尾部分隔符）
-        assert_eq!(
-            build_script_name("D:\\MyWorkspaces\\"),
-            "claude-MyWorkspaces.bat"
-        );
-        // 根目录无叶子 → project 兜底
-        assert_eq!(build_script_name("D:\\"), "claude-project.bat");
-    }
-
-    #[test]
-    fn pick_unique_script_path_avoids_collision() {
-        let dir = temp_root("bat-uniq");
-        let scripts = dir.join("scripts");
-        fs::create_dir_all(&scripts).unwrap();
-        let target = "D:\\MyWorkspaces\\yaotu\\tdc";
-        // 无占用 → 基础名
-        assert_eq!(
-            pick_unique_script_path(&scripts, target),
-            scripts.join("claude-tdc.bat")
-        );
-        // 基础名被其他路径占用 → 加序号 2
-        fs::write(scripts.join("claude-tdc.bat"), "@echo off\r\ncd /d \"C:\\other\"").unwrap();
-        assert_eq!(
-            pick_unique_script_path(&scripts, target),
-            scripts.join("claude-tdc-2.bat")
-        );
-        // 2 也被占用 → 3
-        fs::write(scripts.join("claude-tdc-2.bat"), "@echo off\r\ncd /d \"C:\\other2\"").unwrap();
-        assert_eq!(
-            pick_unique_script_path(&scripts, target),
-            scripts.join("claude-tdc-3.bat")
-        );
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn gen_bat_template() {
-        let bat = gen_bat("D:\\MyWorkspaces\\tdc", "tdc");
-        assert!(bat.starts_with("@echo off\r\n"));
-        assert!(bat.contains("chcp 65001"));
-        assert!(bat.contains("cd /d \"D:\\MyWorkspaces\\tdc\""));
-        assert!(bat.contains("call claude"));
-        assert!(bat.contains(":err"));
-        assert!(!bat.contains('\n') || bat.contains("\r\n"));
-    }
-
-    #[test]
-    fn gen_sh_template() {
-        let sh = gen_sh("/Users/me/My Workspaces/proj", "proj");
-        assert!(sh.starts_with("#!/bin/bash\n"));
-        // 目录失效也走 fail()（不闪退），与 claude 缺失共用同一提示+等待逻辑
-        assert!(sh.contains("fail() {"));
-        assert!(sh.contains("cd \"/Users/me/My Workspaces/proj\" || fail"));
-        assert!(sh.contains("command -v claude"));
-        assert!(sh.contains("exec claude"));
     }
 
     #[test]
@@ -2717,6 +2655,94 @@ mod tests {
         assert!(script.contains("exec claude --resume 5426d6d0-c08f-43bd-94df-4d6d99e5c699"));
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    // ---------------- 去脚本化：项目清单与迁移 ----------------
+
+    #[test]
+    fn list_projects_impl_merges_scan_and_manual() {
+        let root = temp_root("proj-list");
+        let projects = root.join("projects");
+        // 手动添加但磁盘上存在的路径 → 非 missing；手动添加但不存在的 → missing
+        let real = Path::new(&root).join("real_proj");
+        fs::create_dir_all(&real).unwrap();
+
+        let list = list_projects_impl(&projects, &[real.to_str().unwrap().to_string(), "D:\\ghost\\path".to_string()]);
+        // 会话目录为空 → 只有手动项；大小写不敏感去重后 2 条
+        assert_eq!(list.len(), 2);
+        let delta = list.iter().find(|x| x.path == "D:\\ghost\\path").unwrap();
+        assert!(delta.missing);
+        assert_eq!(delta.name, "path");
+        let real_item = list.iter().find(|x| x.path == real.to_str().unwrap()).unwrap();
+        assert!(!real_item.missing);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn legacy_config_migrates_to_projects() {
+        let root = temp_root("proj-migrate");
+        // 旧脚本：claude-oldproj.bat 指向 D:\legacy\proj；claude-dead.bat 指向不存在目录
+        let scripts = root.join("scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(
+            scripts.join("claude-oldproj.bat"),
+            "@echo off\r\ncd /d \"D:\\legacy\\proj\"",
+        )
+        .unwrap();
+        fs::write(
+            scripts.join("claude-dead.bat"),
+            "@echo off\r\ncd /d \"D:\\legacy\\dead\"",
+        )
+        .unwrap();
+        // 旧版 config：favorites 存脚本 key、无 projects 字段
+        fs::write(
+            root.join("config.json"),
+            r#"{"favorites": ["claude-oldproj", "claude-unknown"], "dark": false}"#,
+        )
+        .unwrap();
+
+        ensure_projects_migrated_in(&root);
+
+        let migrated = load_config_from(&root);
+        // projects = 全部脚本路径（顺序按解析序，包含已失效的）
+        assert!(migrated
+            .projects
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case("D:\\legacy\\proj")));
+        assert!(migrated
+            .projects
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case("D:\\legacy\\dead")));
+        // favorites = 旧收藏 key 映射后的路径；unknown 找不到被丢弃
+        assert_eq!(migrated.favorites, vec!["D:\\legacy\\proj"]);
+        // 幂等：二次调用不再变化
+        ensure_projects_migrated_in(&root);
+        let again = load_config_from(&root);
+        assert_eq!(again.projects, migrated.projects);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn add_remove_project_updates_lists() {
+        // add_project_to 要求路径真实存在（不存在的路径被静默忽略）
+        let dir = temp_root("add-rm");
+        let alpha = dir.join("alpha");
+        let beta = dir.join("beta");
+        fs::create_dir_all(&alpha).unwrap();
+        fs::create_dir_all(&beta).unwrap();
+        let mut manual: Vec<String> = Vec::new();
+        add_project_to(&mut manual, alpha.to_str().unwrap());
+        // 大小写不敏感去重
+        add_project_to(&mut manual, &alpha.to_str().unwrap().to_uppercase());
+        assert_eq!(manual.len(), 1);
+        add_project_to(&mut manual, beta.to_str().unwrap());
+        assert_eq!(manual.len(), 2);
+        remove_project_from(&mut manual, &beta.to_str().unwrap().to_uppercase());
+        assert_eq!(manual, vec![alpha.to_str().unwrap().to_string()]);
+        // 不存在的路径被静默忽略
+        add_project_to(&mut manual, "D:\\ghost\\never");
+        assert_eq!(manual.len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 /// 退出程序（托盘菜单/前端调用；绕过关闭拦截直接退出）
@@ -2763,6 +2789,10 @@ pub fn run() {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+            // 旧脚本清单一次性迁移（去脚本化）：解析 scripts/ 旧脚本生成
+            // config.projects / 新版 favorites（路径），幂等
+            ensure_projects_migrated();
+
             let show_i = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
@@ -2791,13 +2821,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            list_launchers,
-            check_launchers,
+            list_projects,
+            check_projects,
             load_config,
             save_config,
-            create_launcher,
-            delete_launcher,
-            launch_claude,
+            add_project,
+            remove_project,
+            launch_project,
             open_folder,
             check_claude,
             scan_claude_projects,

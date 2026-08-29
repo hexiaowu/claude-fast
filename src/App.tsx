@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./lib/api";
-import type { CloseAction, Launcher, SessionInfo } from "./types";
+import type { CloseAction, Project, SessionInfo } from "./types";
 import Header from "./components/Header";
 import Toolbar from "./components/Toolbar";
 import ProjectList from "./components/ProjectList";
@@ -28,7 +28,8 @@ interface ConfirmState {
 }
 
 export default function App() {
-  const [launchers, setLaunchers] = useState<Launcher[]>([]);
+  const [items, setItems] = useState<Project[]>([]);
+  const [projectDirs, setProjectDirs] = useState<string[]>([]);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [dark, setDark] = useState(false);
   const [search, setSearch] = useState("");
@@ -96,7 +97,7 @@ export default function App() {
       setCloseChoiceOpen(false);
       if (remember) {
         setCloseAction(action);
-        await api.saveConfig(favorites, dark, action).catch(() => {});
+        await api.saveConfig(favorites, projectDirs, dark, action).catch(() => {});
       }
       if (action === "minimize") {
         await getCurrentWindow().hide();
@@ -104,26 +105,27 @@ export default function App() {
         await api.quitApp();
       }
     },
-    [favorites, dark],
+    [favorites, projectDirs, dark],
   );
 
   // ---------- 数据加载 ----------
 
   const load = useCallback(async () => {
     try {
-      const [list, cfg] = await Promise.all([api.listLaunchers(), api.loadConfig()]);
-      setLaunchers(list);
+      const [list, cfg] = await Promise.all([api.listProjects(), api.loadConfig()]);
+      setItems(list);
       setFavorites(cfg.favorites ?? []);
+      setProjectDirs(cfg.projects ?? []);
       setDark(cfg.dark ?? false);
       setCloseAction(cfg.closeAction ?? null);
       // 选中项可能已被删除，清理
       setSelectedKey((k) => (k && list.some((l) => l.key === k) ? k : null));
       // 健康检查在后台异步执行（不阻塞列表渲染）；
-      // 被移除项目的目录检查较慢/超时，结果回来后自动标记失效。
+      // 路径不存在的结果回来后自动标记失效。
       api
-        .checkLaunchers(list.map((l) => l.path ?? ""))
+        .checkProjects(list.map((l) => l.path))
         .then((results) => {
-          setLaunchers((prev) =>
+          setItems((prev) =>
             prev.map((l, i) => ({ ...l, healthy: results[i] ?? false })),
           );
         })
@@ -165,12 +167,17 @@ export default function App() {
   const persistConfig = useCallback(
     async (favs: string[], d: boolean, ca?: CloseAction) => {
       try {
-        await api.saveConfig(favs, d, ca === undefined ? closeAction : ca);
+        await api.saveConfig(
+          favs,
+          projectDirs,
+          d,
+          ca === undefined ? closeAction : ca,
+        );
       } catch (e) {
         showToast("保存配置失败：" + String(e));
       }
     },
-    [showToast, closeAction],
+    [showToast, closeAction, projectDirs],
   );
 
   const toggleFav = useCallback(
@@ -210,46 +217,46 @@ export default function App() {
 
   const sorted = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const filtered = launchers.filter(
+    const filtered = items.filter(
       (l) =>
         !q ||
-        l.label.toLowerCase().includes(q) ||
-        (l.path ?? "").toLowerCase().includes(q),
+        l.name.toLowerCase().includes(q) ||
+        l.path.toLowerCase().includes(q),
     );
-    // 收藏组按 favorites 数组顺序渲染（拖拽排序的真源；launchers 原始顺序与此无关）
+    // 收藏组按 favorites 数组顺序渲染（拖拽排序的真源；合并列表原始顺序与此无关）
     const byKey = new Map(filtered.map((l) => [l.key, l]));
     const fav = favorites
       .map((k) => byKey.get(k))
-      .filter((l): l is Launcher => !!l);
+      .filter((l): l is Project => !!l);
     const rest = filtered
       .filter((l) => !favorites.includes(l.key))
-      .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
     return [...fav, ...rest];
-  }, [launchers, favorites, search]);
+  }, [items, favorites, search]);
 
-  const missing = launchers.filter((l) => l.healthy === false);
+  const missing = items.filter((l) => l.healthy === false);
 
   // ---------- 操作 ----------
 
   const launch = useCallback(
     async (key: string) => {
-      const l = launchers.find((x) => x.key === key);
+      const l = items.find((x) => x.key === key);
       if (!l) return;
       if (l.healthy === false) {
         showToast(`目录不存在，无法启动：${l.path}`);
         return;
       }
       try {
-        await api.launchClaude(l.file);
+        await api.launchProject(l.path);
       } catch (e) {
         showToast("启动失败：" + String(e));
       }
     },
-    [launchers, showToast],
+    [items, showToast],
   );
 
   const openFolder = useCallback(
-    async (l: Launcher) => {
+    async (l: Project) => {
       if (!l.path) return;
       try {
         await api.openFolder(l.path);
@@ -261,7 +268,7 @@ export default function App() {
   );
 
   const copyPath = useCallback(
-    async (l: Launcher) => {
+    async (l: Project) => {
       if (!l.path) return;
       try {
         await navigator.clipboard.writeText(l.path);
@@ -273,12 +280,12 @@ export default function App() {
     [showToast],
   );
 
-  const removeLauncher = useCallback(
-    async (l: Launcher) => {
+  const removeProject = useCallback(
+    async (l: Project) => {
       try {
-        await api.deleteLauncher(l.file);
+        await api.removeProject(l.path);
       } catch (e) {
-        showToast("删除失败：" + String(e));
+        showToast("移除失败：" + String(e));
         return;
       }
       const favs = favorites.filter((f) => f !== l.key);
@@ -287,22 +294,22 @@ export default function App() {
         await persistConfig(favs, dark);
       }
       await load();
-      showToast(`已删除 ${l.label}`);
+      showToast(`已从列表移除 ${l.name}`);
     },
     [favorites, dark, persistConfig, load, showToast],
   );
 
   const confirmRemove = useCallback(
-    (l: Launcher) => {
+    (l: Project) => {
       setConfirm({
-        title: "移除启动脚本",
-        message: `将永久删除以下启动脚本：\n\n${l.label}\n${l.file}\n\n继续？`,
-        okText: "删除",
+        title: "从列表移除项目",
+        message: `将从列表移除以下项目：\n\n${l.name}\n${l.path}\n\n（不会删除磁盘上的项目文件）\n继续？`,
+        okText: "移除",
         danger: true,
-        onOk: () => removeLauncher(l),
+        onOk: () => removeProject(l),
       });
     },
-    [removeLauncher],
+    [removeProject],
   );
 
   // ---------- 会话管理（v2.0.0 阶段一） ----------
@@ -314,7 +321,7 @@ export default function App() {
         return;
       }
       setExpandedKey(key);
-      const l = launchers.find((x) => x.key === key);
+      const l = items.find((x) => x.key === key);
       if (!l?.path) {
         showToast("该项目未解析到路径，无法读取会话");
         return;
@@ -328,7 +335,7 @@ export default function App() {
         showToast("加载会话失败：" + String(e));
       }
     },
-    [expandedKey, launchers, showToast],
+    [expandedKey, items, showToast],
   );
 
   const renameSession = useCallback(
@@ -339,7 +346,7 @@ export default function App() {
       setRenameTarget(null);
       // 重命名后刷新该项目会话列表（若仍处于展开状态）
       if (expandedKey === key) {
-        const l = launchers.find((x) => x.key === key);
+        const l = items.find((x) => x.key === key);
         if (l?.path) {
           const list = await api.listSessions(l.path).catch(() => null);
           if (list) setSessionsByKey((prev) => ({ ...prev, [key]: list }));
@@ -347,17 +354,17 @@ export default function App() {
       }
       showToast("已重命名");
     },
-    [renameTarget, expandedKey, launchers, showToast],
+    [renameTarget, expandedKey, items, showToast],
   );
 
   const refreshSessions = useCallback(
     async (key: string) => {
-      const l = launchers.find((x) => x.key === key);
+      const l = items.find((x) => x.key === key);
       if (!l?.path) return;
       const list = await api.listSessions(l.path).catch(() => null);
       if (list) setSessionsByKey((prev) => ({ ...prev, [key]: list }));
     },
-    [launchers],
+    [items],
   );
 
   const deleteSession = useCallback(
@@ -394,19 +401,19 @@ export default function App() {
 
   const loadSessionMessages = useCallback(
     async (key: string, session: SessionInfo) => {
-      const launcher = launchers.find((x) => x.key === key);
+      const launcher = items.find((x) => x.key === key);
       setActiveSession({
         session,
         key,
         projectPath: launcher?.path ?? null,
       });
     },
-    [launchers],
+    [items],
   );
 
   const resumeSession = useCallback(
     async (key: string, session: SessionInfo) => {
-      const launcher = launchers.find((x) => x.key === key);
+      const launcher = items.find((x) => x.key === key);
       if (!launcher?.path) {
         showToast("该项目未解析到路径，无法继续对话");
         return;
@@ -418,7 +425,7 @@ export default function App() {
         showToast("启动失败：" + String(e));
       }
     },
-    [launchers, showToast],
+    [items, showToast],
   );
 
   // ---------- 渲染 ----------
@@ -478,7 +485,7 @@ export default function App() {
       </main>
 
       <StatusBar
-        total={launchers.length}
+        total={items.length}
         favCount={favorites.length}
         missingCount={missing.length}
         claudeOk={claudeOk}
@@ -488,7 +495,7 @@ export default function App() {
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          launcher={launchers.find((l) => l.key === menu.key) ?? null}
+          project={items.find((l) => l.key === menu.key) ?? null}
           favorites={favorites}
           onClose={() => setMenu(null)}
           onToggleFav={toggleFav}
@@ -525,11 +532,11 @@ export default function App() {
 
       {dialog === "health" && (
         <HealthDialog
-          launchers={launchers}
+          items={items}
           claudeOk={claudeOk}
           onClose={() => setDialog(null)}
           onDelete={async (items) => {
-            for (const l of items) await removeLauncher(l);
+            for (const l of items) await removeProject(l);
             setDialog(null);
           }}
         />

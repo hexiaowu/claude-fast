@@ -1,16 +1,21 @@
-export interface Launcher {
-  label: string;
-  path: string | null;
-  file: string;
+export interface Project {
+  /** 唯一键 = 项目绝对路径 */
   key: string;
-  /** undefined = 尚未检查（启动时秒渲染，后台异步检查后回填） */
+  /** 叶子目录名（显示用） */
+  name: string;
+  /** 项目绝对路径 */
+  path: string;
+  /** undefined = 尚未检查（列表先渲染，后台异步检查后回填）；false = 路径已不存在 */
   healthy?: boolean;
 }
 
 export type CloseAction = "quit" | "minimize" | null;
 
 export interface Config {
+  /** 收藏的项目绝对路径（置顶） */
   favorites: string[];
+  /** 手动添加的项目路径清单 */
+  projects: string[];
   dark: boolean;
   /** null/undefined = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction?: CloseAction;
@@ -24,10 +29,8 @@ export interface CreateResult {
 export interface ClaudeProject {
   name: string;
   path: string;
-  /** true = 真实路径已不存在（项目代码被删除），不参与生成 */
+  /** true = 真实路径已不存在（项目代码被删除），不可启动 */
   missing: boolean;
-  /** true = 数据根 scripts/ 下已有该项目的启动脚本 */
-  existing: boolean;
 }
 
 /** Claude Code 会话元数据（来自 ~/.claude/projects 下 jsonl 的轻量解析） */
