@@ -118,15 +118,34 @@ export function validateResumePath(
   return proj;
 }
 
-/** 构造 resume 的 cmd 命令行（Windows）：
- *  `cmd /k cd /d "<项目路径>" && claude --resume <session-id>` */
+/** 构造 resume 的 start 链（Windows）：
+ *  `start "Claude Code" /d "<项目路径>" cmd /k claude --resume <session-id>`（外层配 cmd /c）。
+ *  必须经 start 创建新 console：Electron GUI 主进程（无控制台）+ stdio ignore spawn
+ *  控制台程序时 Windows 不分配新 console，claude 拿不到 TTY 会立即退出且无任何窗口。 */
 export function buildResumeCmdline(
   projectPath: string,
   sessionId: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
   const proj = validateResumePath(projectPath, platform);
-  return `/k cd /d "${proj}" && claude --resume ${sessionId}`;
+  return `start "Claude Code" /d "${proj}" cmd /k claude --resume ${sessionId}`;
+}
+
+/** spawn 一条 `cmd /c <start 链>`：start 用 CREATE_NEW_CONSOLE 新开终端窗口，
+ *  走系统默认终端委托（conhost/Windows Terminal），外层 cmd 无窗口立即退出。 */
+function spawnStartChain(
+  cmdline: string,
+  cwd: string,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/c", cmdline], {
+      cwd,
+      windowsVerbatimArguments: true,
+      stdio: "ignore",
+    });
+    child.on("error", (e) => reject(new Error(String(e))));
+    child.once("spawn", () => resolve());
+  });
 }
 
 /** 构造 resume 的临时脚本内容（macOS）：
@@ -141,7 +160,7 @@ export function buildResumeScript(
 }
 
 /** 继续对话：新开终端窗口，在项目目录运行 `claude --resume <session-id>`。
- *  Windows：cmd /k；macOS：临时 .sh + Terminal.app 打开。 */
+ *  Windows：cmd /c + start 链（新 console 走默认终端委托）；macOS：临时 .sh + Terminal.app。 */
 export function resumeSession(
   file: string,
   projectPath: string,
@@ -149,46 +168,35 @@ export function resumeSession(
   platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
   const { sessionId } = validateSessionFile(file, projectsDir);
-  return new Promise((resolve, reject) => {
-    let child: ChildProcess;
-    if (platform === "win32") {
-      let cmdline: string;
-      try {
-        cmdline = buildResumeCmdline(projectPath, sessionId, platform);
-      } catch (e) {
-        reject(e);
-        return;
-      }
-      const proj = projectPath.trim();
-      child = spawn("cmd.exe", [cmdline], {
-        cwd: proj,
-        detached: true,
-        windowsVerbatimArguments: true,
-        stdio: "ignore",
-      });
-    } else {
-      let content: string;
-      try {
-        content = buildResumeScript(projectPath, sessionId, platform);
-      } catch (e) {
-        reject(e);
-        return;
-      }
-      // 临时脚本放系统临时目录（内容幂等，同名覆盖无害；系统自动清理），
-      // 用 `open -a Terminal` 打开——不需要 osascript 自动化权限
-      const tmp = path.join(os.tmpdir(), `claude-fast-resume-${sessionId}.sh`);
-      try {
-        fs.writeFileSync(tmp, content, "utf8");
-        fs.chmodSync(tmp, 0o755);
-      } catch (e) {
-        reject(new Error(`写入临时脚本失败：${String(e)}`));
-        return;
-      }
-      child = spawn("open", ["-a", "Terminal", tmp], {
-        detached: true,
-        stdio: "ignore",
-      });
+  if (platform === "win32") {
+    let cmdline: string;
+    try {
+      cmdline = buildResumeCmdline(projectPath, sessionId, platform);
+    } catch (e) {
+      return Promise.reject(e);
     }
+    return spawnStartChain(cmdline, projectPath.trim());
+  }
+  let content: string;
+  try {
+    content = buildResumeScript(projectPath, sessionId, platform);
+  } catch (e) {
+    return Promise.reject(new Error(`写入临时脚本失败：${String(e)}`));
+  }
+  // 临时脚本放系统临时目录（内容幂等，同名覆盖无害；系统自动清理），
+  // 用 `open -a Terminal` 打开——不需要 osascript 自动化权限
+  const tmp = path.join(os.tmpdir(), `claude-fast-resume-${sessionId}.sh`);
+  try {
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.chmodSync(tmp, 0o755);
+  } catch (e) {
+    return Promise.reject(new Error(`写入临时脚本失败：${String(e)}`));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("open", ["-a", "Terminal", tmp], {
+      detached: true,
+      stdio: "ignore",
+    });
     child.on("error", (e) => reject(new Error(String(e))));
     child.once("spawn", () => {
       child.unref();
@@ -312,10 +320,11 @@ export function removeProject(manualPaths: string[], dir: string): string[] {
   return manualPaths.filter((p) => p.toLowerCase() !== dir.toLowerCase());
 }
 
-/** 启动项目（新会话）：新开终端，cd 到项目目录运行 claude。
- *  不经过任何脚本文件；Windows 不带 detached（控制台走默认终端委托，
- *  避免 claude 2.x 原生启动器的 bash 探测各自弹独立 conhost 窗口）；
- *  /k 让 claude 退出后窗口保留、便于查看输出。 */
+/** 启动项目（新会话）：新开终端，在项目目录运行 claude。
+ *  不经过任何脚本文件；Windows 经 `cmd /c start "Claude Code" /d "<项目>" cmd /k claude`
+ *  新开 console——Electron GUI 主进程（无控制台）+ stdio ignore 直接 spawn cmd 时
+ *  Windows 不分配新 console，claude 无 TTY 会静默退出且无窗口（2026-09 实测根因）；
+ *  /k 让 claude 退出后窗口保留、便于查看输出。macOS：临时 sh + Terminal.app。 */
 export function launchProject(
   projectPath: string,
   platform: NodeJS.Platform = process.platform,
@@ -323,19 +332,7 @@ export function launchProject(
   const dir = projectPath.trim();
   if (!statIsDirectory(dir)) throw new Error("项目路径不存在");
   if (platform === "win32") {
-    return new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        "cmd.exe",
-        [`/k`, `cd /d "${dir}" && claude`],
-        {
-          cwd: dir,
-          windowsVerbatimArguments: true,
-          stdio: "ignore",
-        },
-      );
-      child.on("error", (e) => reject(new Error(String(e))));
-      child.once("spawn", () => resolve());
-    });
+    return spawnStartChain(`start "Claude Code" /d "${dir}" cmd /k claude`, dir);
   }
   // macOS：临时 sh + Terminal.app（无需 osascript 自动化权限）
   const sh = path.join(

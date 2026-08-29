@@ -68,10 +68,11 @@ describe("validateResumePath", () => {
 });
 
 describe("buildResumeCmdline / buildResumeScript", () => {
-  it("Windows 命令行：cd /d + claude --resume", () => {
+  it("Windows 命令行：start 链新开 console + claude --resume", () => {
     const cmd = buildResumeCmdline(tmp, UUID, "win32");
-    expect(cmd.startsWith('/k cd /d "')).toBe(true);
-    expect(cmd).toContain(`&& claude --resume ${UUID}`);
+    // start 的第一个带引号参数是窗口标题，/d 设工作目录，内层 cmd /k 运行 claude
+    expect(cmd.startsWith('start "Claude Code" /d "')).toBe(true);
+    expect(cmd).toContain(`cmd /k claude --resume ${UUID}`);
   });
 
   it("Windows 非法路径先被校验拦截", () => {

@@ -1,7 +1,6 @@
 // Electron 主进程：窗口 / 托盘 / 单实例 / 关闭拦截 / 全部 IPC 命令
 // （对齐原 Tauri 后端 lib.rs 的 run() + 22 个 commands）
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "electron";
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, saveConfig, type Config } from "./backend/config";
@@ -9,9 +8,8 @@ import {
   addProject,
   checkClaude,
   checkLaunchers,
-  buildResumeCmdline,
-  legacyScriptPaths,
   launchProject,
+  legacyScriptPaths,
   listProjects,
   openFolder,
   removeProject,
@@ -280,26 +278,8 @@ function registerIpc(): void {
   handle("purge_trash", () => purgeTrashIn(trashRootDir()));
   handle("get_session_messages", (p) =>
     getSessionMessages(String(p.file), projectsDir(), toInt(p.offset)));
-  handle("resume_session", (p) => {
-    const file = String(p.file);
-    const projectPath = String(p.projectPath);
-    if (process.platform === "win32") {
-      // Windows：与 launch 同款——spawn cmd（不带 detached，控制台走默认终端
-      // 委托），cmdline 形如 `/k cd /d "..." && claude --resume <id>`
-      const { sessionId } = validateSessionFile(file, projectsDir());
-      const cmdline = buildResumeCmdline(projectPath, sessionId);
-      const child = spawn("cmd.exe", [cmdline], {
-        cwd: projectPath.trim(),
-        windowsVerbatimArguments: true,
-        stdio: "ignore",
-      });
-      return new Promise<void>((resolve, reject) => {
-        child.on("error", (e) => reject(new Error(String(e))));
-        child.once("spawn", () => resolve());
-      });
-    }
-    return resumeSession(file, projectPath, projectsDir());
-  });
+  handle("resume_session", (p) =>
+    resumeSession(String(p.file), String(p.projectPath), projectsDir()));
 
   // ---------- 其他 ----------
   handle("get_data_root", () => {
