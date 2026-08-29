@@ -17,6 +17,8 @@
     "build:renderer": "vite build",
     "build:electron": "node tools/build-electron.mjs",
     "start": "electron .",
+    "electron:dev": "npm run dev",
+    "electron:build": "npm run dist:win",
     "dist": "npm run build && electron-builder --win --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac"

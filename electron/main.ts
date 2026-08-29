@@ -1,6 +1,7 @@
 // Electron 主进程：窗口 / 托盘 / 单实例 / 关闭拦截 / 全部 IPC 命令
 // （对齐原 Tauri 后端 lib.rs 的 run() + 22 个 commands）
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "electron";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, saveConfig, type Config } from "./backend/config";
 import { createLauncher, deleteLauncher, listLaunchers } from "./backend/launchers";
@@ -268,6 +269,19 @@ function registerIpc(): void {
     quitting = true;
     mainWindow?.destroy();
   });
+}
+
+// ---------------- userData 隔离 ----------------
+// Electron 默认 userData = %APPDATA%/claude-fast，会与数据根撞目录（Chromium
+// 缓存文件混进用户数据）；必须在 app ready 之前重定向到独立 userdata/ 子目录
+{
+  const userDataDir = path.join(app.getPath("appData"), "claude-fast", "userdata");
+  try {
+    fs.mkdirSync(userDataDir, { recursive: true });
+    app.setPath("userData", userDataDir);
+  } catch {
+    // 设置失败时保持默认路径
+  }
 }
 
 // ---------------- 单实例 ----------------

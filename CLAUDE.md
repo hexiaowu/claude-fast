@@ -74,7 +74,7 @@ npm run dev                  # 开发模式（vite 热更新 + electron，主进
 npm test                     # 后端单元测试（107 个：路径解析/脚本生成/配置/扫描/根目录定位/会话管理/mangle/回收站）
 npm run typecheck            # 类型检查（前端 tsc + electron tsc）
 npm run build                # 生产构建（typecheck + vite build + esbuild 编译主进程）
-npm run dist:win             # Windows NSIS 安装包
+npm run dist:win             # Windows NSIS 安装包（别名：npm run electron:build）
 npm run dist:mac             # macOS dmg（x64 + arm64）
 ```
 
