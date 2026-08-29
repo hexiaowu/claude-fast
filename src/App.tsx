@@ -144,7 +144,7 @@ export default function App() {
       .then((info) => {
         if (info.installMode && !localStorage.getItem("cf-data-tip")) {
           localStorage.setItem("cf-data-tip", "1");
-          setToast(`数据目录：${info.path}（启动脚本 scripts/ 与收藏保存在此）`);
+          setToast(`数据目录：${info.path}（项目清单与收藏保存在此）`);
           window.setTimeout(() => setToast(null), 5000);
         }
       })
@@ -525,7 +525,7 @@ export default function App() {
           onDone={async (count) => {
             setDialog(null);
             await load();
-            showToast(`批量添加完成：新增 ${count} 个启动脚本`);
+            showToast(`批量添加完成：新增 ${count} 个项目`);
           }}
         />
       )}

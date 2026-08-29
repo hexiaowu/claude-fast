@@ -55,6 +55,10 @@ pub struct Config {
     /// 手动添加的项目路径清单（Claude 会话扫描之外的补充）
     #[serde(default)]
     projects: Vec<String>,
+    /// 被用户从列表移除的项目路径：会话扫描会重新发现它们，
+    /// 用排除清单让「移除」对扫描来源的项目同样生效
+    #[serde(default)]
+    excluded: Vec<String>,
     dark: bool,
     /// 关闭窗口行为：None=每次询问；Some("quit")=直接退出；Some("minimize")=最小化到托盘
     #[serde(default)]
@@ -239,11 +243,18 @@ fn stat_is_dir(p: &str) -> bool {
     Path::new(p).is_dir()
 }
 
-/// 构建主列表：Claude 会话扫描 ∪ config.projects 手动清单，按路径去重。
+/// 构建主列表：Claude 会话扫描 ∪ config.projects 手动清单，按路径去重，
+/// 并剔除排除清单（用户已移除）中的项目。
 /// missing = 路径当前不存在（仍显示、标红、不可启动）。
-fn list_projects_impl(projects_dir: &Path, manual: &[String]) -> Vec<ProjectItem> {
+fn list_projects_impl(
+    projects_dir: &Path,
+    manual: &[String],
+    excluded: &[String],
+) -> Vec<ProjectItem> {
     let mut out: Vec<ProjectItem> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    let is_excluded =
+        |p: &str| excluded.iter().any(|x| x.eq_ignore_ascii_case(p));
     let push = |item: ProjectItem, out: &mut Vec<ProjectItem>, seen: &mut Vec<String>| {
         let key = item.key.to_lowercase();
         if !seen.iter().any(|s| *s == key) {
@@ -252,6 +263,9 @@ fn list_projects_impl(projects_dir: &Path, manual: &[String]) -> Vec<ProjectItem
         }
     };
     for s in scan_claude_projects_blocking(projects_dir) {
+        if is_excluded(&s.path) {
+            continue; // 用户已移除：即使会话扫描重新发现也不显示
+        }
         push(
             ProjectItem {
                 key: s.path.clone(),
@@ -264,6 +278,9 @@ fn list_projects_impl(projects_dir: &Path, manual: &[String]) -> Vec<ProjectItem
         );
     }
     for mp in manual {
+        if is_excluded(mp) {
+            continue;
+        }
         let name = Path::new(mp)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -375,13 +392,13 @@ fn ensure_projects_migrated_in(root: &Path) {
             }
         }
     }
-    let _ = save_config_to(root, favorites, projects, cfg.dark, cfg.close_action);
+    let _ = save_config_to(root, favorites, projects, Vec::new(), cfg.dark, cfg.close_action);
 }
 
 #[tauri::command]
 fn list_projects() -> Vec<ProjectItem> {
     let cfg = load_config();
-    list_projects_impl(&claude_projects_dir(), &cfg.projects)
+    list_projects_impl(&claude_projects_dir(), &cfg.projects, &cfg.excluded)
 }
 
 #[tauri::command]
@@ -391,7 +408,15 @@ fn add_project(path: String) -> Result<(), String> {
         return Err("路径不存在或不是文件夹".to_string());
     }
     add_project_to(&mut cfg.projects, &path);
-    save_config(cfg.favorites.clone(), cfg.projects.clone(), cfg.dark, cfg.close_action.clone())
+    // 重新加入 = 解除排除
+    cfg.excluded.retain(|x| !x.eq_ignore_ascii_case(&path));
+    save_config(
+        cfg.favorites.clone(),
+        cfg.projects.clone(),
+        cfg.excluded.clone(),
+        cfg.dark,
+        cfg.close_action.clone(),
+    )
 }
 
 #[tauri::command]
@@ -400,7 +425,21 @@ fn remove_project(path: String) -> Result<(), String> {
     remove_project_from(&mut cfg.projects, &path);
     // 收藏里同步移除（列表键已变为项目路径）
     remove_project_from(&mut cfg.favorites, &path);
-    save_config(cfg.favorites.clone(), cfg.projects.clone(), cfg.dark, cfg.close_action.clone())
+    // 加入排除清单：会话扫描会重新发现该项目，必须过滤才能让「移除」生效
+    if !cfg
+        .excluded
+        .iter()
+        .any(|x| x.eq_ignore_ascii_case(&path))
+    {
+        cfg.excluded.push(path.clone());
+    }
+    save_config(
+        cfg.favorites.clone(),
+        cfg.projects.clone(),
+        cfg.excluded.clone(),
+        cfg.dark,
+        cfg.close_action.clone(),
+    )
 }
 
 /// 读取配置：主文件损坏时自动回退到 .bak 并恢复主文件（收藏不丢失）
@@ -427,6 +466,7 @@ fn load_config_from(root: &Path) -> Config {
 fn save_config(
     favorites: Vec<String>,
     projects: Vec<String>,
+    excluded: Vec<String>,
     dark: bool,
     close_action: Option<String>,
 ) -> Result<(), String> {
@@ -434,6 +474,7 @@ fn save_config(
         &resolve_root_dir(),
         favorites,
         projects,
+        excluded,
         dark,
         close_action,
     )
@@ -443,12 +484,14 @@ fn save_config_to(
     root: &Path,
     favorites: Vec<String>,
     projects: Vec<String>,
+    excluded: Vec<String>,
     dark: bool,
     close_action: Option<String>,
 ) -> Result<(), String> {
     let cfg = Config {
         favorites,
         projects,
+        excluded,
         dark,
         close_action,
     };
@@ -2666,7 +2709,11 @@ mod tests {
         let real = Path::new(&root).join("real_proj");
         fs::create_dir_all(&real).unwrap();
 
-        let list = list_projects_impl(&projects, &[real.to_str().unwrap().to_string(), "D:\\ghost\\path".to_string()]);
+        let list = list_projects_impl(
+            &projects,
+            &[real.to_str().unwrap().to_string(), "D:\\ghost\\path".to_string()],
+            &[],
+        );
         // 会话目录为空 → 只有手动项；大小写不敏感去重后 2 条
         assert_eq!(list.len(), 2);
         let delta = list.iter().find(|x| x.path == "D:\\ghost\\path").unwrap();

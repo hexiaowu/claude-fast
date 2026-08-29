@@ -79,7 +79,7 @@ export default function HealthDialog({ items, claudeOk, onClose, onDelete }: Pro
                 onDelete([...missing]);
               }}
             >
-              {busy ? "删除中…" : `全部删除启动脚本（${missing.length}）`}
+              {busy ? "移除中…" : `从列表移除失效项目（${missing.length}）`}
             </button>
           )}
         </div>

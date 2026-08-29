@@ -14,7 +14,7 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  // 已在 config.projects 清单中的项目路径（小写比对）
+  // 已在 config.projects 清单中的项目路径（小写比对）——不可再勾选
   const [inList, setInList] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -31,7 +31,7 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
         setDir(dir);
         setProjects(list);
         setInList(inListSet);
-        // 默认勾选未失效且尚未加入清单的项目；已失效的不勾选
+        // 默认勾选未失效且尚未加入清单的项目；已失效与已在列表的不勾选
         setChecked(
           new Set(
             list
@@ -122,7 +122,7 @@ export default function BatchAddDialog({ onClose, onDone }: Props) {
                 <input
                   type="checkbox"
                   checked={checked.has(p.path)}
-                  disabled={p.missing}
+                  disabled={p.missing || listed}
                   onChange={() => toggle(p.path)}
                 />
                 <div className="batch-item-body">

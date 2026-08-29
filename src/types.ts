@@ -16,6 +16,8 @@ export interface Config {
   favorites: string[];
   /** 手动添加的项目路径清单 */
   projects: string[];
+  /** 被用户从列表移除的项目路径（会话扫描会重新发现它们，需排除） */
+  excluded?: string[];
   dark: boolean;
   /** null/undefined = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction?: CloseAction;
