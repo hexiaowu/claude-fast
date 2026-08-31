@@ -1,2 +1,5 @@
-* text=auto
-src-tauri/gen/schemas/*.json text eol=lf
+# 全仓统一 LF（检出也写 LF），与 cargo / rustfmt / 前端编辑器的输出一致。
+# 若只写 text=auto：Windows 系统 core.autocrlf=true 检出时写 CRLF，而 cargo
+# 重写 Cargo.toml 永远写 LF，两者打架会出现永久幽灵改动（status 报 M、diff 为空）。
+# text=auto 的二进制自动检测仍然生效（png/exe 等不会被改动）。
+* text=auto eol=lf
