@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import type { Group, Launcher } from "../types";
+import type { Group, Project } from "../types";
 
 interface Props {
   x: number;
   y: number;
-  launcher: Launcher | null;
+  project: Project | null;
   favorites: string[];
   groups: Group[];
   onClose: () => void;
   onToggleFav: (key: string) => void;
-  onOpenFolder: (l: Launcher) => void;
-  onCopyPath: (l: Launcher) => void;
-  onRemove: (l: Launcher) => void;
+  onOpenFolder: (l: Project) => void;
+  onCopyPath: (l: Project) => void;
+  onRemove: (l: Project) => void;
   onHealth: () => void;
   onMoveToGroup: (key: string, groupName: string | null) => void;
   /** 二级视图「新建分组」：创建分组并把该项目移入 */
@@ -21,7 +21,7 @@ interface Props {
 export default function ContextMenu({
   x,
   y,
-  launcher,
+  project,
   favorites,
   groups,
   onClose,
@@ -60,9 +60,9 @@ export default function ContextMenu({
     overflowY: "auto",
   };
 
-  if (launcher && view === "groups") {
+  if (project && view === "groups") {
     const currentNs =
-      groups.find((g) => g.keys.includes(launcher.key))?.name ?? null;
+      groups.find((g) => g.keys.includes(project.key))?.name ?? null;
     return (
       <div className="context-menu" ref={ref} style={style}>
         <button className="context-item context-back" onClick={() => setView("main")}>
@@ -73,7 +73,7 @@ export default function ContextMenu({
           className="context-item"
           disabled={currentNs === null}
           onClick={() => {
-            onMoveToGroup(launcher.key, null);
+            onMoveToGroup(project.key, null);
             onClose();
           }}
         >
@@ -85,7 +85,7 @@ export default function ContextMenu({
             className="context-item"
             disabled={currentNs === g.name}
             onClick={() => {
-              onMoveToGroup(launcher.key, g.name);
+              onMoveToGroup(project.key, g.name);
               onClose();
             }}
           >
@@ -97,7 +97,7 @@ export default function ContextMenu({
         <button
           className="context-item"
           onClick={() => {
-            onStartCreateGroup(launcher.key);
+            onStartCreateGroup(project.key);
             onClose();
           }}
         >
@@ -109,28 +109,28 @@ export default function ContextMenu({
 
   return (
     <div className="context-menu" ref={ref} style={style}>
-      {launcher && (
+      {project && (
         <>
           <div className="context-title">
-            {launcher.label}
-            {launcher.healthy === false && <span className="tag tag-danger">失效</span>}
+            {project.name}
+            {project.healthy === false && <span className="tag tag-danger">失效</span>}
           </div>
           <div className="context-sep" />
-          <button className="context-item" onClick={() => { onToggleFav(launcher.key); onClose(); }}>
-            {favorites.includes(launcher.key) ? "☆ 取消收藏" : "★ 收藏（置顶）"}
+          <button className="context-item" onClick={() => { onToggleFav(project.key); onClose(); }}>
+            {favorites.includes(project.key) ? "☆ 取消收藏" : "★ 收藏（置顶）"}
           </button>
           <button className="context-item" onClick={() => setView("groups")}>
             移动到分组 ▸
           </button>
-          <button className="context-item" onClick={() => { onOpenFolder(launcher); onClose(); }}>
+          <button className="context-item" onClick={() => { onOpenFolder(project); onClose(); }}>
             打开所在文件夹
           </button>
-          <button className="context-item" onClick={() => { onCopyPath(launcher); onClose(); }}>
+          <button className="context-item" onClick={() => { onCopyPath(project); onClose(); }}>
             复制路径
           </button>
           <div className="context-sep" />
-          <button className="context-item context-danger" onClick={() => { onRemove(launcher); onClose(); }}>
-            {launcher.healthy === false ? "✗ 移除（目录已失效）" : "移除启动脚本"}
+          <button className="context-item context-danger" onClick={() => { onRemove(project); onClose(); }}>
+            {project.healthy === false ? "✗ 移除（目录已失效）" : "从列表移除"}
           </button>
           <div className="context-sep" />
         </>

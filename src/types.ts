@@ -1,9 +1,11 @@
-export interface Launcher {
-  label: string;
-  path: string | null;
-  file: string;
+export interface Project {
+  /** 唯一键 = 项目绝对路径 */
   key: string;
-  /** undefined = 尚未检查（启动时秒渲染，后台异步检查后回填） */
+  /** 叶子目录名（显示用） */
+  name: string;
+  /** 项目绝对路径 */
+  path: string;
+  /** undefined = 尚未检查（列表先渲染，后台异步检查后回填）；false = 路径已不存在 */
   healthy?: boolean;
 }
 
@@ -11,11 +13,17 @@ export type CloseAction = "quit" | "minimize" | null;
 
 export interface Group {
   name: string;
+  /** 分组内项目的 key（= 项目绝对路径） */
   keys: string[];
 }
 
 export interface Config {
+  /** 收藏的项目绝对路径（置顶） */
   favorites: string[];
+  /** 手动添加的项目路径清单 */
+  projects: string[];
+  /** 被用户从列表移除的项目路径（会话扫描会重新发现它们，需排除） */
+  excluded?: string[];
   dark: boolean;
   /** null/undefined = 每次询问；"quit" = 直接退出；"minimize" = 最小化到托盘 */
   closeAction?: CloseAction;
@@ -27,22 +35,15 @@ export interface Config {
 
 /** 主列表分节（App 派生，ProjectList 渲染） */
 export type Section =
-  | { kind: "favorites"; items: Launcher[] }
-  | { kind: "group"; name: string; items: Launcher[]; collapsed: boolean }
-  | { kind: "ungrouped"; items: Launcher[] };
-
-export interface CreateResult {
-  file: string;
-  existed: boolean;
-}
+  | { kind: "favorites"; items: Project[] }
+  | { kind: "group"; name: string; items: Project[]; collapsed: boolean }
+  | { kind: "ungrouped"; items: Project[] };
 
 export interface ClaudeProject {
   name: string;
   path: string;
-  /** true = 真实路径已不存在（项目代码被删除），不参与生成 */
+  /** true = 真实路径已不存在（项目代码被删除），不可启动 */
   missing: boolean;
-  /** true = 数据根 scripts/ 下已有该项目的启动脚本 */
-  existing: boolean;
 }
 
 /** Claude Code 会话元数据（来自 ~/.claude/projects 下 jsonl 的轻量解析） */

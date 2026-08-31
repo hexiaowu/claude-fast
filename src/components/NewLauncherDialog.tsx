@@ -32,11 +32,8 @@ export default function NewLauncherDialog({ onClose, onCreated }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const result = await api.createLauncher(d);
+      await api.addProject(d);
       onCreated();
-      // 提示覆盖/新建结果
-      const action = result.existed ? "已覆盖" : "已创建";
-      alert(`已${action}启动脚本：\n${result.file}`); // eslint-disable-line no-alert
     } catch (e) {
       setError(String(e));
       setBusy(false);
@@ -46,7 +43,7 @@ export default function NewLauncherDialog({ onClose, onCreated }: Props) {
   };
 
   return (
-    <Modal title="新建 Claude 启动脚本" width={560} onClose={onClose}>
+    <Modal title="添加项目" width={560} onClose={onClose}>
       <div className="form">
         <label className="form-label">项目文件夹路径（可手动输入，或点「浏览…」选择）</label>
         <div className="form-row">
@@ -68,7 +65,7 @@ export default function NewLauncherDialog({ onClose, onCreated }: Props) {
             取消
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={busy}>
-            {busy ? "创建中…" : "确定"}
+            {busy ? "添加中…" : "确定"}
           </button>
         </div>
       </div>

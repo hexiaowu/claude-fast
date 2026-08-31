@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import type { DragEvent } from "react";
-import type { Launcher, Section, SessionInfo } from "../types";
+import type { Project, Section, SessionInfo } from "../types";
 
 interface Props {
   sections: Section[];
@@ -183,7 +183,7 @@ export default function ProjectList({
   }
 
   /** 单行渲染（含收藏星标、拖拽、右键、会话展开），供各分节复用 */
-  const renderRow = (l: Launcher) => {
+  const renderRow = (l: Project) => {
         const isFav = favorites.includes(l.key);
         const canDrag = dragEnabled && isFav;
         const showDrop = overKey === l.key && l.key !== dragKey;
@@ -226,10 +226,10 @@ export default function ProjectList({
               </button>
               <div className="row-body" title="展开/收起会话列表">
                 <div className="row-label">
-                  {l.label}
+                  {l.name}
                   {l.healthy === false && <span className="tag tag-danger">失效</span>}
                 </div>
-                <div className="row-path">{l.path ?? "（未解析到路径）"}</div>
+                <div className="row-path">{l.path}</div>
               </div>
               {l.healthy !== false && (
                 <div className="row-actions">
