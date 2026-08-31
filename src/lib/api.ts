@@ -12,6 +12,7 @@ import type {
   SessionMessages,
   SessionSearchHit,
   TrashedSession,
+  UsageStats,
 } from "../types";
 
 /** Tauri 后端命令封装（去脚本化：项目清单为路径模型） */
@@ -63,6 +64,12 @@ export const api = {
   /** 导出会话到指定路径（markdown / jsonl），返回写入的字节数 */
   exportSession: (file: string, destPath: string, format: "markdown" | "jsonl") =>
     invoke<number>("export_session", { file, destPath, format }),
+  /** 全局使用统计（仪表盘；后端带文件级 mtime 缓存）。单日统计按本地时区归属：
+   *  getTimezoneOffset 返回 UTC-本地（东八区为 -480），取负得东偏分钟数 */
+  getUsageStats: () =>
+    invoke<UsageStats>("get_usage_stats", {
+      tzOffsetMinutes: -new Date().getTimezoneOffset(),
+    }),
   /** 新开终端窗口 resume 会话继续对话 */
   resumeSession: (file: string, projectPath: string) =>
     invoke("resume_session", { file, projectPath }),

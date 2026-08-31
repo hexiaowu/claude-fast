@@ -141,12 +141,9 @@ pub struct SessionMessage {
     /// assistant 的 token 用量（user 消息为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
-    /// 本消息成本（USD，jsonl 顶层 costUSD；缺失为 None）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cost_usd: Option<f64>,
 }
 
-/// 会话级 token / 成本统计（parse 全量消息后聚合，分页不影响准确性）
+/// 会话级 token 统计（parse 全量消息后聚合，分页不影响准确性）
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsageStats {
@@ -158,8 +155,6 @@ pub struct SessionUsageStats {
     cache_creation_tokens: u64,
     /// 总 token（输入 + 输出 + 缓存读取 + 缓存写入）
     total_tokens: u64,
-    /// 总成本（USD，jsonl 的 costUSD 字段求和；缺失时为 0）
-    cost_usd: f64,
 }
 
 #[derive(Serialize)]
@@ -1295,8 +1290,11 @@ fn parse_content_blocks(content: Option<&serde_json::Value>, role: &str) -> Vec<
 
 /// 解析 jsonl 全文为会话消息列表（核心逻辑，供 command 与测试复用）：
 /// 只提取 user/assistant 消息，过滤元数据行 / sidechain / isMeta / 命令消息。
+/// **相邻同 message.id 的 assistant 行合并为一条**：Claude Code 流式写入把
+/// 一次响应拆成多行（每块一行，共享 usage），不合并会重复显示且统计虚高。
 fn parse_session_messages(content: &str) -> Vec<SessionMessage> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<SessionMessage> = Vec::new();
+    let mut last_msg_id: Option<String> = None;
     for line in content.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
@@ -1327,6 +1325,16 @@ fn parse_session_messages(content: &str) -> Vec<SessionMessage> {
         if blocks.is_empty() {
             continue;
         }
+        let msg_id = msg.get("id").and_then(|i| i.as_str()).map(String::from);
+        // 相邻同 id：同一响应的后续块，追加进上一条消息（usage 取首行——各行相同）
+        if let (Some(id), Some(last)) = (&msg_id, &last_msg_id) {
+            if id == last {
+                if let Some(last_msg) = messages.last_mut() {
+                    last_msg.blocks.extend(blocks);
+                    continue;
+                }
+            }
+        }
         messages.push(SessionMessage {
             kind: role.to_string(),
             blocks,
@@ -1336,11 +1344,8 @@ fn parse_session_messages(content: &str) -> Vec<SessionMessage> {
                 .map(|s| s.to_string()),
             model: msg.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()),
             usage: parse_usage(msg.get("usage")),
-            cost_usd: v
-                .get("costUSD")
-                .and_then(|c| c.as_f64())
-                .or_else(|| msg.get("costUSD").and_then(|c| c.as_f64())),
         });
+        last_msg_id = msg_id;
     }
     messages
 }
@@ -1374,7 +1379,7 @@ fn slice_messages(
     }
 }
 
-/// 对全量消息聚合 token / 成本统计（usage 是解析时保留的，分页切片不影响准确性）
+/// 对全量消息聚合 token 统计（usage 是解析时保留的，分页切片不影响准确性）
 fn aggregate_usage(messages: &[SessionMessage]) -> SessionUsageStats {
     let mut stats = SessionUsageStats::default();
     stats.message_count = messages.len();
@@ -1384,9 +1389,6 @@ fn aggregate_usage(messages: &[SessionMessage]) -> SessionUsageStats {
             stats.output_tokens += u.output_tokens;
             stats.cache_read_tokens += u.cache_read_input_tokens;
             stats.cache_creation_tokens += u.cache_creation_input_tokens;
-        }
-        if let Some(c) = m.cost_usd {
-            stats.cost_usd += c;
         }
     }
     stats.total_tokens = stats.input_tokens
@@ -1662,6 +1664,345 @@ async fn export_session(
     let bytes = build_export_bytes(&content, &format, &title)?;
     fs::write(&dest, &bytes).map_err(|e| format!("写入导出文件失败：{e}"))?;
     Ok(bytes.len() as u64)
+}
+
+// ---------------- 使用统计仪表盘 ----------------
+
+/// 单个模型的用量汇总
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    /// 完整模型名（前端简化显示日期后缀）
+    model: String,
+    tokens: u64,
+    messages: usize,
+}
+
+/// 单日用量
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsage {
+    /// YYYY-MM-DD（消息 timestamp 的日期部分）
+    date: String,
+    tokens: u64,
+    /// 当天有 assistant 消息的会话数（按 sessionId 去重）
+    sessions: usize,
+    messages: usize,
+}
+
+/// 单项目用量
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUsage {
+    /// 项目显示名
+    name: String,
+    /// 真实路径（unmangle 找到真实存在者；项目已删除时用首选候选）
+    path: String,
+    sessions: usize,
+    messages: usize,
+    tokens: u64,
+}
+
+/// 全局使用统计（仪表盘数据；订阅版 jsonl 无 costUSD，故只统计 token）
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageStats {
+    sessions: usize,
+    messages: usize,
+    /// 总 token（输入 + 输出 + 缓存读取 + 缓存写入）
+    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    /// 最早 / 最新消息日期（YYYY-MM-DD）
+    earliest: Option<String>,
+    latest: Option<String>,
+    /// 按日期升序
+    per_day: Vec<DailyUsage>,
+    /// 按 token 倒序
+    per_project: Vec<ProjectUsage>,
+    /// 按 token 倒序
+    per_model: Vec<ModelUsage>,
+}
+
+/// 单个 jsonl 文件的用量聚合（统计口径与查看器不同：**sidechain 子代理消息
+/// 也计入**——它们同样是真实 token 消耗；只提取字段不构造消息结构，比
+/// parse_session_messages 轻得多）。
+#[derive(Clone, Default)]
+struct FileUsage {
+    messages: usize,
+    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    /// date -> (tokens, messages)
+    per_day: std::collections::BTreeMap<String, (u64, usize)>,
+    /// model -> (tokens, messages)
+    per_model: std::collections::HashMap<String, (u64, usize)>,
+}
+
+/// 公历日期 → Unix epoch 天数（Howard Hinnant days_from_civil，civil_from_days 的反函数）
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// ISO-8601 UTC 时间戳（Claude Code jsonl 的固定格式）→ epoch 毫秒。失败返回 None。
+fn iso_to_epoch_ms(iso: &str) -> Option<i64> {
+    let b = iso.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        std::str::from_utf8(&b[r]).ok()?.parse::<i64>().ok()
+    };
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let ms = if b.len() >= 23 { num(20..23).unwrap_or(0) } else { 0 };
+    let days = days_from_civil(y, mo, d);
+    Some((days * 86400 + h * 3600 + mi * 60 + s) * 1000 + ms)
+}
+
+/// UTC epoch 毫秒 + 时区偏移（分钟，东八区 = 480）→ 本地日期 YYYY-MM-DD
+fn local_date_of(epoch_ms: i64, tz_offset_minutes: i64) -> String {
+    let days = (epoch_ms + tz_offset_minutes * 60_000).div_euclid(86_400_000);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 流式扫描一个 jsonl 的用量（核心逻辑，供 command 与测试复用）。
+/// **按 message.id 去重**：Claude Code 流式写入把一次 API 响应拆成多行
+/// （每个内容块一行），每行携带同一份 usage，不去重会成倍虚高。
+/// **日期按本地时区归属**：timestamp 是 UTC，直接截日期会让单日统计错位
+/// 一个时区（如东八区晚间高峰归到错误的日期）。
+fn scan_file_usage(content: &str, tz_offset_minutes: i64) -> FileUsage {
+    let mut u = FileUsage::default();
+    let mut seen_msg_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
+        let Some(usage) = parse_usage(msg.get("usage")) else {
+            continue;
+        };
+        // 同一响应的多行共享 message.id：只统计第一次出现
+        if let Some(id) = msg.get("id").and_then(|i| i.as_str()) {
+            if !seen_msg_ids.insert(id.to_string()) {
+                continue;
+            }
+        }
+        let model = msg
+            .get("model")
+            .and_then(|m| m.as_str())
+            .or_else(|| v.get("model").and_then(|m| m.as_str()))
+            .unwrap_or("unknown")
+            .to_string();
+        let date = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .and_then(iso_to_epoch_ms)
+            .map(|ms| local_date_of(ms, tz_offset_minutes));
+        let line_tokens = usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_input_tokens
+            + usage.cache_creation_input_tokens;
+        u.messages += 1;
+        u.tokens += line_tokens;
+        u.input_tokens += usage.input_tokens;
+        u.output_tokens += usage.output_tokens;
+        u.cache_read_tokens += usage.cache_read_input_tokens;
+        u.cache_creation_tokens += usage.cache_creation_input_tokens;
+        if let Some(d) = &date {
+            let e = u.per_day.entry(d.clone()).or_default();
+            e.0 += line_tokens;
+            e.1 += 1;
+        }
+        let m = u.per_model.entry(model).or_default();
+        m.0 += line_tokens;
+        m.1 += 1;
+    }
+    u
+}
+
+/// 文件级用量缓存（mtime + 时区偏移失效）：弹窗反复打开时只有变更过的
+/// jsonl 需要重扫；per_day 已是本地时区日期，时区变化也会触发重扫
+static USAGE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, i64, FileUsage)>>,
+> = std::sync::OnceLock::new();
+
+/// 读取（必要时扫描）一个 jsonl 的用量，带 mtime 缓存
+fn file_usage_cached(path: &Path, tz_offset_minutes: i64) -> Option<FileUsage> {
+    let cache = USAGE_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mtime = fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if let Ok(cache) = cache.lock() {
+        if let Some((t, tz, u)) = cache.get(path) {
+            if *t == mtime && *tz == tz_offset_minutes {
+                return Some(u.clone());
+            }
+        }
+    }
+    let content = fs::read_to_string(path).ok()?;
+    let u = scan_file_usage(&content, tz_offset_minutes);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(path.to_path_buf(), (mtime, tz_offset_minutes, u.clone()));
+    }
+    Some(u)
+}
+
+/// 汇总所有项目的用量统计（核心逻辑，供 command 与测试复用）。
+/// projects: (显示名, 真实路径, 项目目录) 列表；日期按 tz_offset_minutes 归属本地时区。
+fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes: i64) -> UsageStats {
+    let mut stats = UsageStats::default();
+    // 当天活跃会话去重（跨文件）：date -> sessionId 集合
+    let mut day_sessions: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut day_map: std::collections::BTreeMap<String, (u64, usize)> =
+        std::collections::BTreeMap::new();
+    let mut model_map: std::collections::HashMap<String, (u64, usize)> =
+        std::collections::HashMap::new();
+    for (name, path, dir) in projects {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        let mut pu = ProjectUsage {
+            name: name.clone(),
+            path: path.clone(),
+            sessions: 0,
+            messages: 0,
+            tokens: 0,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !fname.ends_with(".jsonl") {
+                continue;
+            }
+            let session_id = &fname[..fname.len() - 6];
+            if !is_valid_uuid(session_id) {
+                continue;
+            }
+            let Some(u) = file_usage_cached(&p, tz_offset_minutes) else {
+                continue;
+            };
+            if u.messages == 0 {
+                continue; // 无任何 token 数据的会话不占统计口径
+            }
+            pu.sessions += 1;
+            stats.sessions += 1;
+            pu.messages += u.messages;
+            stats.messages += u.messages;
+            pu.tokens += u.tokens;
+            stats.tokens += u.tokens;
+            stats.input_tokens += u.input_tokens;
+            stats.output_tokens += u.output_tokens;
+            stats.cache_read_tokens += u.cache_read_tokens;
+            stats.cache_creation_tokens += u.cache_creation_tokens;
+            for (d, (t, m)) in &u.per_day {
+                let dm = day_map.entry(d.clone()).or_default();
+                dm.0 += t;
+                dm.1 += m;
+                day_sessions
+                    .entry(d.clone())
+                    .or_default()
+                    .insert(session_id.to_string());
+            }
+            for (mo, (t, m)) in &u.per_model {
+                let mm = model_map.entry(mo.clone()).or_default();
+                mm.0 += t;
+                mm.1 += m;
+            }
+        }
+        if pu.sessions > 0 {
+            stats.per_project.push(pu);
+        }
+    }
+    stats.earliest = day_map.keys().next().cloned();
+    stats.latest = day_map.keys().next_back().cloned();
+    stats.per_day = day_map
+        .into_iter()
+        .map(|(date, (tokens, messages))| DailyUsage {
+            sessions: day_sessions.get(&date).map(|s| s.len()).unwrap_or(0),
+            date,
+            tokens,
+            messages,
+        })
+        .collect();
+    stats.per_model = model_map
+        .into_iter()
+        .map(|(model, (tokens, messages))| ModelUsage {
+            model,
+            tokens,
+            messages,
+        })
+        .collect();
+    stats.per_model.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    stats.per_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    stats
+}
+
+/// 全局使用统计（仪表盘）。在 Tauri 线程池执行，不阻塞 UI。
+/// 口径：excluded（用户已移除）的项目不统计；已删除（missing）的项目仍统计。
+/// tz_offset_minutes：本地时区偏移（东八区 = 480），单日统计按本地日期归属。
+#[tauri::command]
+async fn get_usage_stats(tz_offset_minutes: Option<i64>) -> Result<UsageStats, String> {
+    let dir = claude_projects_dir();
+    let excluded = load_config().excluded;
+    let mut projects: Vec<(String, String, PathBuf)> = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(UsageStats::default());
+    };
+    for e in entries.flatten() {
+        let d = e.path();
+        if !d.is_dir() {
+            continue;
+        }
+        let mangled = e.file_name().to_string_lossy().to_string();
+        let candidates = unmangle_candidates(&mangled);
+        let real = candidates.iter().find(|c| Path::new(c).exists());
+        // 与列表口径一致：任一候选路径命中排除清单即不统计
+        let is_excluded = candidates
+            .iter()
+            .any(|c| excluded.iter().any(|x| x.eq_ignore_ascii_case(c)));
+        if is_excluded {
+            continue;
+        }
+        let (name, path) = match real {
+            Some(r) => (
+                Path::new(r)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| mangled.clone()),
+                r.clone(),
+            ),
+            // 项目目录已不存在：用首选候选路径显示（历史会话仍有统计价值）
+            None => (
+                mangled.clone(),
+                candidates.first().cloned().unwrap_or(mangled.clone()),
+            ),
+        };
+        projects.push((name, path, d));
+    }
+    Ok(aggregate_stats_in(&projects, tz_offset_minutes.unwrap_or(0)))
 }
 
 /// 向会话 jsonl 追加 custom-title 行（核心逻辑，供 command 与测试复用）
@@ -3181,7 +3522,6 @@ mod tests {
         assert_eq!(stats.cache_read_tokens, 12);
         assert_eq!(stats.cache_creation_tokens, 5);
         assert_eq!(stats.total_tokens, 477); // 400 + 60 + 12 + 5
-        assert!((stats.cost_usd - 0.0047).abs() < 1e-9);
         // 分页统计不受切片影响
         let paged = slice_messages(messages, None, Some(2));
         assert_eq!(paged.messages.len(), 2);
@@ -3285,6 +3625,170 @@ mod tests {
         // 未知格式报错
         assert!(build_export_bytes(&jsonl, "pdf", "t").is_err());
     }
+
+    // ---------------- 使用统计仪表盘 ----------------
+
+    #[test]
+    fn scan_file_usage_aggregates_by_day_and_model() {
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}],"model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}},"timestamp":"2026-08-12T06:47:47.000Z","costUSD":0.0012}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}],"model":"claude-opus-4-1","usage":{"input_tokens":{"cache_read":7,"cache_creation":2,"input":300},"output_tokens":40}},"timestamp":"2026-08-13T07:00:00.000Z"}"#,
+            // sidechain 子代理消息同样计入（真实 token 消耗）
+            r#"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"c"}],"model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":2}},"timestamp":"2026-08-12T08:00:00.000Z"}"#,
+            // user 行不计
+            r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-08-12T06:47:46.519Z"}"#,
+        );
+        let u = scan_file_usage(&jsonl, 0);
+        assert_eq!(u.messages, 3);
+        // 100+20+5+3 + 300+40+7+2 + 10+2 = 489
+        assert_eq!(u.tokens, 489);
+        assert_eq!(u.input_tokens, 410);
+        assert_eq!(u.output_tokens, 62);
+        assert_eq!(u.cache_read_tokens, 12);
+        assert_eq!(u.cache_creation_tokens, 5);
+        assert_eq!(u.per_day.len(), 2);
+        assert_eq!(u.per_day["2026-08-12"].1, 2); // 当天 2 条
+        assert_eq!(u.per_day["2026-08-12"].0, 128 + 12);
+        assert_eq!(u.per_model.len(), 2);
+        assert_eq!(u.per_model["claude-sonnet-4-20250514"].1, 2);
+        assert_eq!(u.per_model["claude-opus-4-1"].0, 349);
+    }
+
+    #[test]
+    fn scan_file_usage_skips_non_assistant_and_bad_lines() {
+        let jsonl = "\nnot json\n{\"type\":\"mode\"}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"无usage\"}}\n";
+        let u = scan_file_usage(jsonl, 0);
+        assert_eq!(u.messages, 0);
+        assert!(u.per_day.is_empty());
+    }
+
+    #[test]
+    fn scan_file_usage_dedups_same_msg_id() {
+        // 流式写入：一次响应拆多行，message.id 与 usage 相同 → 只统计一次
+        let jsonl = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"1"}],"usage":{"input_tokens":100,"output_tokens":20}},"timestamp":"2026-08-17T01:00:00.000Z"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":{"input_tokens":100,"output_tokens":20}},"timestamp":"2026-08-17T01:00:01.000Z"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"2"}],"usage":{"input_tokens":50,"output_tokens":10}},"timestamp":"2026-08-17T02:00:00.000Z"}"#,
+        );
+        let u = scan_file_usage(&jsonl, 0);
+        assert_eq!(u.messages, 2); // msg_a 去重后只 1 条 + msg_b
+        assert_eq!(u.tokens, 120 + 60);
+        assert_eq!(u.per_day["2026-08-17"].1, 2); // 当天消息数也是去重口径
+    }
+
+    #[test]
+    fn parse_session_messages_merges_same_msg_id() {        let jsonl = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"你好"},"timestamp":"t1"}"#,
+            // 同一响应的三行（text / tool_use / text）→ 合并为一条消息
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"第一段"}],"usage":{"input_tokens":100,"output_tokens":20}},"timestamp":"t2"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.ts"}}]},"timestamp":"t3"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"第二段"}]},"timestamp":"t4"}"#,
+            // 新响应（不同 id）→ 独立成条
+            r#"{"type":"assistant","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"新响应"}],"usage":{"input_tokens":50,"output_tokens":10}},"timestamp":"t5"}"#,
+        );
+        let messages = parse_session_messages(&jsonl);
+        assert_eq!(messages.len(), 3); // user + msg_a(合并) + msg_b
+        assert_eq!(messages[1].blocks.len(), 3); // text + tool_use + text
+        assert_eq!(messages[1].blocks[0].kind, "text");
+        assert_eq!(messages[1].blocks[1].kind, "tool_use");
+        assert_eq!(messages[1].blocks[2].kind, "text");
+        // usage 取首行，不重复
+        let stats = aggregate_usage(&messages);
+        assert_eq!(stats.input_tokens, 150);
+        assert_eq!(stats.output_tokens, 30);
+        assert_eq!(stats.message_count, 3);
+    }
+
+    #[test]
+    fn aggregate_stats_merges_projects_and_day_sessions() {
+        let root = temp_root("stats-agg");
+        let projects_dir = root.join("projects");
+        let pa = projects_dir.join("D--work-alpha");
+        let pb = projects_dir.join("D--work-beta");
+        fs::create_dir_all(&pa).unwrap();
+        fs::create_dir_all(&pb).unwrap();
+        let line = |ts: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"x"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":{tokens},"output_tokens":1}}}},"timestamp":"{ts}","costUSD":0.001}}"#,
+            )
+        };
+        // 项目 A 两个会话，同一天 → 当天活跃会话数 2
+        fs::write(pa.join("11111111-1111-4111-8111-111111111111.jsonl"), line("2026-08-12T01:00:00.000Z", 100)).unwrap();
+        fs::write(pa.join("22222222-2222-4222-8222-222222222222.jsonl"), line("2026-08-12T02:00:00.000Z", 200)).unwrap();
+        // 项目 B 一个会话，另一天；外加一个非法文件名（应忽略）
+        fs::write(pb.join("33333333-3333-4333-8333-333333333333.jsonl"), line("2026-08-13T01:00:00.000Z", 50)).unwrap();
+        fs::write(pb.join("not-uuid.jsonl"), line("2026-08-13T01:00:00.000Z", 999)).unwrap();
+
+        let projects = vec![
+            ("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone()),
+            ("beta".to_string(), "D:\\work\\beta".to_string(), pb.clone()),
+        ];
+        let s = aggregate_stats_in(&projects, 0);
+        assert_eq!(s.sessions, 3);
+        assert_eq!(s.messages, 3);
+        assert_eq!(s.tokens, 101 + 201 + 51); // (100+1) + (200+1) + (50+1)
+        assert_eq!(s.earliest.as_deref(), Some("2026-08-12"));
+        assert_eq!(s.latest.as_deref(), Some("2026-08-13"));
+        // 当天活跃会话去重：08-12 = 2 个会话
+        assert_eq!(s.per_day[0].date, "2026-08-12");
+        assert_eq!(s.per_day[0].sessions, 2);
+        assert_eq!(s.per_day[1].sessions, 1);
+        // 项目排行按 token 倒序：alpha(202) 在 beta(51) 前
+        assert_eq!(s.per_project.len(), 2);
+        assert_eq!(s.per_project[0].name, "alpha");
+        assert_eq!(s.per_project[0].sessions, 2);
+        // 模型聚合跨项目
+        assert_eq!(s.per_model.len(), 1);
+        assert_eq!(s.per_model[0].model, "claude-sonnet-4");
+        assert_eq!(s.per_model[0].messages, 3);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn iso_to_epoch_and_local_date_conversion() {
+        // ISO → epoch：2026-08-17T00:00:00.000Z 是确定值（与 days_from_civil 对拍）
+        let ms = iso_to_epoch_ms("2026-08-17T00:00:00.000Z").unwrap();
+        assert_eq!(local_date_of(ms, 0), "2026-08-17");
+        // UTC 0 点 +8h → 本地 8 点，同日
+        assert_eq!(local_date_of(ms, 480), "2026-08-17");
+        // UTC 16:30 +8h → 本地次日 00:30（跨天归属）
+        let ms2 = iso_to_epoch_ms("2026-08-17T16:30:00.000Z").unwrap();
+        assert_eq!(local_date_of(ms2, 0), "2026-08-17");
+        assert_eq!(local_date_of(ms2, 480), "2026-08-18");
+        // UTC 15:59 +8h → 本地 23:59，仍同日（边界）
+        let ms3 = iso_to_epoch_ms("2026-08-17T15:59:59.999Z").unwrap();
+        assert_eq!(local_date_of(ms3, 480), "2026-08-17");
+        // 毫秒精度保留
+        assert_eq!(ms3 % 1000, 999);
+        // 非法输入
+        assert!(iso_to_epoch_ms("not-a-timestamp").is_none());
+        assert!(iso_to_epoch_ms("").is_none());
+        // days_from_civil 与 civil_from_days 互逆（20_676 = 2026-08-11，见 civil_from_days_is_accurate）
+        assert_eq!(days_from_civil(2026, 8, 17), 20_682);
+        assert_eq!(civil_from_days(days_from_civil(2026, 8, 17)), (2026, 8, 17));
+    }
+
+    #[test]
+    fn scan_file_usage_attributes_days_in_local_timezone() {
+        // UTC 8/17 16:00 的消息：UTC 口径归 8/17，东八区口径归 8/18
+        let jsonl = format!(
+            "{}\n{}\n",
+            r#"{"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":100,"output_tokens":1}},"timestamp":"2026-08-17T16:00:00.000Z"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"y"}],"usage":{"input_tokens":200,"output_tokens":2}},"timestamp":"2026-08-17T02:00:00.000Z"}"#,
+        );
+        let utc = scan_file_usage(&jsonl, 0);
+        assert_eq!(utc.per_day.len(), 1);
+        assert!(utc.per_day.contains_key("2026-08-17"));
+        let cst = scan_file_usage(&jsonl, 480);
+        assert_eq!(cst.per_day.len(), 2); // 02:00+8h=10:00 归 17 日；16:00+8h=次日 00:00 归 18 日
+        assert!(cst.per_day.contains_key("2026-08-17"));
+        assert!(cst.per_day.contains_key("2026-08-18"));
+        assert_eq!(cst.per_day["2026-08-18"].0, 101); // 16:00 那条
+        assert_eq!(cst.per_day["2026-08-17"].0, 202);
+    }
 }
 
 /// 退出程序（托盘菜单/前端调用；绕过关闭拦截直接退出）
@@ -3384,6 +3888,7 @@ pub fn run() {
             get_session_messages,
             search_session_messages,
             export_session,
+            get_usage_stats,
             resume_session,
             get_data_root,
             autostart_supported,

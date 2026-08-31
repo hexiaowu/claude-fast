@@ -5,10 +5,11 @@ interface Props {
   onBatch: () => void;
   onHealth: () => void;
   onTrash: () => void;
+  onStats: () => void;
 }
 
 export default function Toolbar(props: Props) {
-  const { search, onSearch, onNew, onBatch, onHealth, onTrash } = props;
+  const { search, onSearch, onNew, onBatch, onHealth, onTrash, onStats } = props;
   return (
     <div className="toolbar">
       <div className="search-box">
@@ -38,6 +39,9 @@ export default function Toolbar(props: Props) {
         </button>
         <button className="btn" onClick={onTrash} title="删除的会话在这里，可恢复">
           🗑 回收站
+        </button>
+        <button className="btn" onClick={onStats} title="token 用量 / 成本 / 模型分布统计">
+          📊 统计
         </button>
       </div>
     </div>

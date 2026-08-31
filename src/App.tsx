@@ -15,6 +15,7 @@ import SettingsDialog from "./components/SettingsDialog";
 import CloseChoiceDialog from "./components/CloseChoiceDialog";
 import RenameDialog from "./components/RenameDialog";
 import TrashDialog from "./components/TrashDialog";
+import StatsDialog from "./components/StatsDialog";
 import SessionViewer from "./components/SessionViewer";
 
 export type DialogKind = "new" | "batch" | "health" | null;
@@ -44,6 +45,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   // ---------- 会话管理（v2.0.0 阶段一） ----------
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [sessionsByKey, setSessionsByKey] = useState<
@@ -451,6 +453,7 @@ export default function App() {
         onBatch={() => setDialog("batch")}
         onHealth={() => setDialog("health")}
         onTrash={() => setTrashOpen(true)}
+        onStats={() => setStatsOpen(true)}
       />
 
       <main className="main main-split">
@@ -590,6 +593,8 @@ export default function App() {
           onToast={showToast}
         />
       )}
+
+      {statsOpen && <StatsDialog onClose={() => setStatsOpen(false)} />}
 
       {closeChoiceOpen && (
         <CloseChoiceDialog

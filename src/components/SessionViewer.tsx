@@ -796,7 +796,6 @@ export default function SessionViewer({
               总计 {fmtTokens(stats.totalTokens)} · 输入 {fmtTokens(stats.inputTokens)} · 输出{" "}
               {fmtTokens(stats.outputTokens)}
               {stats.cacheReadTokens > 0 && ` · 缓存读取 ${fmtTokens(stats.cacheReadTokens)}`}
-              {stats.costUsd > 0 && ` · ≈$${stats.costUsd.toFixed(2)}`}
             </div>
           )}
         </div>

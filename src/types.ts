@@ -82,7 +82,7 @@ export interface Usage {
   cacheCreationInputTokens: number;
 }
 
-/** 会话级 token / 成本统计（全量聚合，分页不影响准确性） */
+/** 会话级 token 统计（全量聚合，分页不影响准确性） */
 export interface SessionUsageStats {
   messageCount: number;
   inputTokens: number;
@@ -91,8 +91,6 @@ export interface SessionUsageStats {
   cacheCreationTokens: number;
   /** 总 token（输入 + 输出 + 缓存读取 + 缓存写入） */
   totalTokens: number;
-  /** 总成本（USD，jsonl costUSD 求和；缺失为 0） */
-  costUsd: number;
 }
 
 /** 会话中的一条消息 */
@@ -104,8 +102,6 @@ export interface SessionMessage {
   model?: string | null;
   /** assistant 的 token 用量（user 消息为 undefined） */
   usage?: Usage | null;
-  /** 本消息成本（USD，缺失为 undefined） */
-  costUsd?: number | null;
 }
 
 export interface SessionMessages {
@@ -131,4 +127,52 @@ export interface SessionSearchHit {
   kind: string;
   /** 命中上下文片段（单行化） */
   snippet: string;
+}
+
+/** 单个模型的用量汇总（统计口径：sidechain 子代理消息也计入） */
+export interface ModelUsage {
+  /** 完整模型名（前端简化显示日期后缀） */
+  model: string;
+  tokens: number;
+  messages: number;
+}
+
+/** 单日用量 */
+export interface DailyUsage {
+  /** YYYY-MM-DD */
+  date: string;
+  tokens: number;
+  /** 当天有消息的会话数（按会话去重） */
+  sessions: number;
+  messages: number;
+}
+
+/** 单项目用量 */
+export interface ProjectUsage {
+  name: string;
+  path: string;
+  sessions: number;
+  messages: number;
+  tokens: number;
+}
+
+/** 全局使用统计（仪表盘；excluded 项目不计，已删除项目仍计。订阅版 jsonl 无
+ *  costUSD，故只统计 token） */
+export interface UsageStats {
+  sessions: number;
+  messages: number;
+  /** 总 token（输入 + 输出 + 缓存读取 + 缓存写入） */
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  earliest?: string | null;
+  latest?: string | null;
+  /** 按日期升序 */
+  perDay: DailyUsage[];
+  /** 按 token 倒序 */
+  perProject: ProjectUsage[];
+  /** 按 token 倒序 */
+  perModel: ModelUsage[];
 }
