@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  bundle:
+    name: 打包（${{ matrix.os }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os == 'windows-latest'
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os == 'macos-latest'
+        with:
+          # Intel + Apple Silicon 通吃包需要双架构 target
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ---- 构建（必须走 tauri CLI：自动加 custom-protocol feature，否则产物白屏）----
+      - name: 构建 Windows NSIS 安装包
+        if: matrix.os == 'windows-latest'
+        run: npm run tauri build
+      - name: 构建 macOS 通吃包（Intel + Apple Silicon）
+        if: matrix.os == 'macos-latest'
+        run: npm run tauri build -- --target universal-apple-darwin
+
+      # ---- 代码签名与公证：证书办好后把对应 Secrets 填上，取消下面注释即可，工作流无需其他改动 ----
+      # env 注入到上面对应的「构建」步骤（tauri CLI 检测到 APPLE_* 变量自动签名+公证）：
+      #   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+      #   APPLE_ID / APPLE_PASSWORD（App 专用密码）/ APPLE_TEAM_ID
+
+      - name: 上传 Windows 安装包
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-setup
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+      - name: 上传 macOS 产物（dmg + app）
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+          if-no-files-found: error
