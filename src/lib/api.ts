@@ -10,6 +10,7 @@ import type {
   Project,
   SessionInfo,
   SessionMessages,
+  SessionSearchHit,
   TrashedSession,
 } from "../types";
 
@@ -56,6 +57,12 @@ export const api = {
   /** 读取会话内容（向上分页：offset 省略时返回最后 limit 条） */
   getSessionMessages: (file: string, offset?: number) =>
     invoke<SessionMessages>("get_session_messages", { file, offset }),
+  /** 会话内全文搜索（返回命中消息序号与上下文片段） */
+  searchSessionMessages: (file: string, keyword: string) =>
+    invoke<SessionSearchHit[]>("search_session_messages", { file, keyword }),
+  /** 导出会话到指定路径（markdown / jsonl），返回写入的字节数 */
+  exportSession: (file: string, destPath: string, format: "markdown" | "jsonl") =>
+    invoke<number>("export_session", { file, destPath, format }),
   /** 新开终端窗口 resume 会话继续对话 */
   resumeSession: (file: string, projectPath: string) =>
     invoke("resume_session", { file, projectPath }),

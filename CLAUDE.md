@@ -2,9 +2,18 @@
 
 一键在项目目录启动 Claude Code 的桌面应用：**Tauri 2 + React + TypeScript（前端）+ Rust（后端）**，Windows + macOS 双平台，不限定工作区目录。
 
-> **版本线**：仓库已重新规划，当前全部代码为 **v1.0.0**（`package.json` / `Cargo.toml` / `tauri.conf.json` 三处版本号一致）。历史上的 PowerShell/WinForms 版与 v2.x/v3.x 旧版号均已作废，代码中不要再按旧版本号理解。
+> **版本线**：仓库已重新规划，当前全部代码为 **v1.0.0**（`package.json` / `Cargo.toml` / `tauri.conf.json` 三处版本号一致）。历史上的 PowerShell/WinForms 版与 v2.x/v3.x 旧版号均已作废，代码中不要再按旧版本号理解。另有 **Node.js（Electron）后端重构分支** `claude-fast-electron`（见下「分支结构」）。
 >
 > **去脚本化（重要）**：项目清单为**路径模型**——`config.json` 的 `favorites`/`projects` 存的都是**项目绝对路径**（不再是脚本名），`+` 号启动直接 `cmd /k cd /d "项目" && claude`，**不再生成/执行 scripts/ 启动脚本**。旧版脚本在首次启动时被自动解析迁移（`ensure_projects_migrated`，幂等）。项目列表 = Claude 会话目录扫描（unmangle 反解）∪ config.projects 手动清单。
+
+## 分支结构（双后端）
+
+| 分支 | 后端 | 说明 |
+|---|---|---|
+| `v1.0.0`（当前）/ `main` | **Tauri 2 + Rust** | 本 CLAUDE.md 描述的主版本线，后端在 `src-tauri/` |
+| `claude-fast-electron` | **Electron + Node.js** | Node 重构后端服务的分支（自 `f76a56f` 分叉）：**前端技术栈不变**（React + TS + Vite），后端改为 `electron/main.ts`（主进程/窗口/托盘/IPC）+ `electron/backend/*.ts`（业务模块：paths/scriptnames/config/mangle/sessions/trash/platform/text，vitest 单测）；构建走 npm（vite + esbuild + electron-builder）。细节见该分支的 CLAUDE.md / README.md |
+
+两分支各自独立演进，**去脚本化（路径模型）与「从列表移除 → excluded 排除清单」已在两端对齐**；不要跨分支混用实现细节（IPC 通道、构建命令、配置读写互不通用），在 `claude-fast-electron` 分支工作时以其分支内 CLAUDE.md 为准。
 
 ## 核心文件
 
@@ -45,6 +54,7 @@
 - **会话管理**：点击项目行展开其 Claude Code 会话列表（异步加载不阻塞 UI）；会话行显示标题 + 相对时间 + 摘要，悬停出现 ✎ 重命名、🗑 删除。`list_sessions(project_path)` 用真实路径正向 mangle 定位 `<projects>/<mangled>/`，对每个 `.jsonl` 只读首尾各 64KB（`LITE_READ_BUF_SIZE`）提取元数据：标题回退链 customTitle > aiTitle > 首条用户消息；**命令消息（如 `/init`）被跳过——只执行命令、无实质对话的会话不进列表**；sidechain/纯元数据会话过滤；按 mtime 倒序。`rename_session(file, new_title)` 安全校验（限 projects 目录下 uuid.jsonl）后向 jsonl **追加** `custom-title` 行（与 Claude Code `/rename` 同机制，不覆盖原文件）。
 - **回收站（删除 = 移入回收站）**：`delete_session` 先备份到数据根 `trash/sessions/<时间戳>/<项目>/` 再删除；「🗑 回收站」对话框可 `restore_session` 恢复（移回原目录，Claude Code 可继续 resume）或 `purge_session` / `purge_trash` 永久删除（行内二次确认）。
 - **会话内容查看**：左右分栏（左 320px 项目/会话列表，右内容区）。`get_session_messages(file)` 全量读 jsonl 提取 user/assistant 消息（text/thinking/tool_use/tool_result 块，`MAX_SESSION_MESSAGES=500` 截断，过滤 sidechain/isMeta/命令消息），前端聊天式渲染（思考/工具调用/工具结果 `<details>` 折叠、围栏代码块等宽）。
+- **会话域增强（搜索 / 统计 / 导出 / 文件导航）**：`search_session_messages(file, keyword)` 全文件全文搜索（text 块 + tool_use 输入，跳过 thinking/tool_result，大小写不敏感，上限 `MAX_SEARCH_HITS=200`），命中跳转可跨分页定位（加载含目标消息的页 + `data-msg-index` 滚动 + `data-block-idx` 展开 diff 卡）；`get_session_messages` 返回 `SessionUsageStats`（token/成本统计：usage 字段新旧两种格式防御式解析、costUSD 求和，meta 区展示）；`export_session(file, dest, format)` 导出 Markdown（`render_session_markdown`：text 原样 / thinking 引用块 / tool_use 摘要行不转储 input / tool_result 截断 200 字符）或 JSONL 原文复制；变更文件面板聚合 Edit/Write/MultiEdit 的 `file_path`（相对路径，按目录分组），点击定位到首见消息并展开对应卡片。
 - **单实例**（`tauri-plugin-single-instance`）：重复启动不新建进程，回调里 show + unminimize + set_focus + `set_always_on_top` 开关（对抗 Windows 前台锁定，勿当冗余代码删掉）把已有窗口调到前台。
 - 其他：深色主题（`dark`）、搜索过滤、右键菜单、新建/删除启动脚本、关闭行为可选（`close_action`：询问/退出/最小化到托盘）、系统托盘（显示窗口/退出）。状态存 `config.json`。
 
@@ -66,7 +76,7 @@
 ```bash
 npm install                  # 前端依赖
 npm run tauri dev            # 开发模式（热更新）
-cd src-tauri && cargo test   # 后端单元测试（61 个：路径解析/脚本生成/配置/扫描/根目录定位/会话管理/mangle/sh_quote）
+cd src-tauri && cargo test   # 后端单元测试（60 个：路径解析/脚本生成/配置/扫描/根目录定位/会话管理/mangle/sh_quote）
 npm run tauri build          # 生产构建
 # macOS 通吃包（Intel + Apple Silicon）：npm run tauri build -- --target universal-apple-darwin
 ```

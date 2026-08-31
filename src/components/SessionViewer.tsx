@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import type {
   ContentBlock,
   SessionInfo,
   SessionMessage,
+  SessionSearchHit,
+  SessionUsageStats,
 } from "../types";
 
 interface Props {
@@ -334,22 +337,24 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-/** 单条消息 */
+/** 单条消息（data-msg-index 供搜索/文件面板定位跳转） */
 function Message({
   msg,
   resultMap,
   toolNames,
+  msgIndex,
 }: {
   msg: SessionMessage;
   resultMap: Map<string, boolean>;
   toolNames: Map<string, string>;
+  msgIndex: number;
 }) {
   if (msg.kind === "user") {
     const texts = msg.blocks.filter((b) => b.kind === "text");
     const results = msg.blocks.filter((b) => b.kind === "tool_result");
     if (texts.length === 0 && results.length > 0) {
       return (
-        <div className="msg msg-tool-result-only">
+        <div className="msg msg-tool-result-only" data-msg-index={msgIndex}>
           {results.map((b, i) => (
             <ToolResultCard
               key={i}
@@ -361,7 +366,7 @@ function Message({
       );
     }
     return (
-      <div className="msg msg-user">
+      <div className="msg msg-user" data-msg-index={msgIndex}>
         <div className="msg-user-body">
           {texts.map((b, i) => (
             <MarkdownText key={i} text={b.text ?? ""} />
@@ -379,7 +384,7 @@ function Message({
     );
   }
   return (
-    <div className="msg msg-assistant">
+    <div className="msg msg-assistant" data-msg-index={msgIndex}>
       <div className="msg-head">
         <span className="msg-model">{msg.model ?? "Claude"}</span>
         <span className="msg-time">{formatTime(msg.timestamp)}</span>
@@ -392,13 +397,15 @@ function Message({
             return <ThinkingBlock key={i} text={b.text ?? ""} />;
           case "tool_use": {
             const id = b.toolUseId ?? `${i}`;
+            // data-block-idx 供搜索命中/文件面板跳转时定位并展开该工具行
             return (
-              <ToolUseRow
-                key={i}
-                block={b}
-                hasResult={resultMap.has(id)}
-                isError={resultMap.get(id) ?? false}
-              />
+              <div key={i} data-block-idx={`${msgIndex}-${i}`}>
+                <ToolUseRow
+                  block={b}
+                  hasResult={resultMap.has(id)}
+                  isError={resultMap.get(id) ?? false}
+                />
+              </div>
             );
           }
           default:
@@ -409,7 +416,64 @@ function Message({
   );
 }
 
-/** 右侧会话内容区：打开定位在最后一条，向上翻自动加载更早的 500 条 */
+/** token 缩写：1234 → 1.2K，3456789 → 3.5M */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+/** 还原高亮：把 <mark> 恢复为纯文本节点（关键词清空时调用） */
+function clearHighlight(root: HTMLElement) {
+  root.querySelectorAll("mark").forEach((m) => {
+    m.replaceWith(document.createTextNode(m.textContent ?? ""));
+  });
+}
+
+/**
+ * 关键词高亮：TreeWalker 只处理文本节点，包裹 <mark>。
+ * 不用字符串替换净化后的 HTML —— 关键词若出现在属性值里会注入非法标记。
+ */
+function highlightKeyword(root: HTMLElement, keyword: string) {
+  const kw = keyword.trim().toLowerCase();
+  if (!kw) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    const text = node.nodeValue ?? "";
+    const lower = text.toLowerCase();
+    if (!lower.includes(kw)) continue;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    let idx: number;
+    while ((idx = lower.indexOf(kw, pos)) !== -1) {
+      if (idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, idx)));
+      const mark = document.createElement("mark");
+      mark.textContent = text.slice(idx, idx + kw.length);
+      frag.appendChild(mark);
+      pos = idx + kw.length;
+    }
+    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+    node.parentNode?.replaceChild(frag, node);
+  }
+}
+
+/** 变更文件：聚合 Edit/Write/MultiEdit 的 file_path（相对路径） */
+interface ChangedFile {
+  path: string;
+  /** 所在目录（file_path 除最后一段外的部分） */
+  dir: string;
+  file: string;
+  /** 首见位置：messages 数组内索引（全局序号 = offset + msgIdx） */
+  msgIdx: number;
+  blockIdx: number;
+  /** 编辑次数 */
+  count: number;
+}
+
+/** 右侧会话内容区：打开定位在最后一条，向上翻自动加载更早的 500 条。
+ *  会话域增强（v2.0.0）：消息搜索、token/成本统计、导出、变更文件导航。 */
 export default function SessionViewer({
   session,
   projectPath,
@@ -420,19 +484,39 @@ export default function SessionViewer({
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState<SessionUsageStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
   /** 初始加载完成后滚动到底部（焦点在最新一条） */
   const scrollToBottomRef = useRef(true);
+
+  // ---------- 搜索 ----------
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SessionSearchHit[] | null>(null);
+
+  // ---------- 变更文件面板 / 导出 ----------
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   // 初始加载：默认取最后 500 条（session 切换或点「刷新」时重新加载）
   useEffect(() => {
     if (!session) {
       setMessages([]);
+      setStats(null);
+      setSearchResults(null);
       return;
     }
+    // 切换会话时重置搜索与面板状态
+    setSearchOpen(false);
+    setSearchKeyword("");
+    setSearchResults(null);
+    setFilesOpen(false);
+    setExportMenuOpen(false);
     let cancelled = false;
     scrollToBottomRef.current = true;
     setLoading(true);
@@ -444,6 +528,7 @@ export default function SessionViewer({
         setOffset(data.offset);
         setHasMore(data.hasMore);
         setTotal(data.total);
+        setStats(data.stats);
       })
       .catch((e) => onToast("加载会话内容失败：" + String(e)))
       .finally(() => {
@@ -478,6 +563,7 @@ export default function SessionViewer({
       setOffset(data.offset);
       setHasMore(data.hasMore);
       setTotal(data.total);
+      setStats(data.stats);
       // 新增内容在顶部：滚动偏移补偿，保持当前阅读位置
       requestAnimationFrame(() => {
         if (body) body.scrollTop = prevTop + (body.scrollHeight - prevHeight);
@@ -516,6 +602,174 @@ export default function SessionViewer({
     return { resultMap, toolNames };
   }, [messages]);
 
+  // ---------- 搜索 ----------
+
+  // 防抖 300ms 调后端全文搜索（结果按消息序号返回）
+  useEffect(() => {
+    if (!session || !searchKeyword.trim()) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    const kw = searchKeyword.trim();
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      setSearching(true);
+      api
+        .searchSessionMessages(session.file, kw)
+        .then((r) => {
+          if (!cancelled) setSearchResults(r);
+        })
+        .catch((e) => {
+          if (!cancelled) onToast("搜索失败：" + String(e));
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [session, searchKeyword, onToast]);
+
+  // 关键词高亮：作用于消息区与搜索结果片段（关键词清空/消息增减时重建）
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    clearHighlight(body);
+    if (searchKeyword.trim()) highlightKeyword(body, searchKeyword);
+  }, [searchKeyword, messages]);
+  useEffect(() => {
+    const results = resultsRef.current;
+    if (!results) return;
+    clearHighlight(results);
+    if (searchKeyword.trim()) highlightKeyword(results, searchKeyword);
+  }, [searchKeyword, searchResults]);
+
+  /** 跳转到某条消息（全局序号）：未加载的分页先加载对应页再定位 */
+  const jumpTo = useCallback(
+    async (globalIndex: number, blockIndex?: number) => {
+      if (!session) return;
+      const first = offset; // messages[0] 的全局序号
+      let needFrame = false;
+      if (globalIndex < first || globalIndex >= first + messages.length) {
+        const pageStart = Math.floor(globalIndex / PAGE_SIZE) * PAGE_SIZE;
+        try {
+          const data = await api.getSessionMessages(session.file, pageStart);
+          setMessages(data.messages);
+          setOffset(data.offset);
+          setHasMore(data.hasMore);
+          setTotal(data.total);
+          setStats(data.stats);
+          needFrame = true; // 等 React 提交 DOM 后再定位
+        } catch (e) {
+          onToast("定位失败：" + String(e));
+          return;
+        }
+      }
+      const locate = () => {
+        const body = bodyRef.current;
+        if (!body) return;
+        const el = body.querySelector(`[data-msg-index="${globalIndex}"]`);
+        if (!el) return;
+        el.scrollIntoView({ block: "start" });
+        // 高亮闪烁（重触发动画）
+        const flash = el as HTMLElement;
+        flash.classList.remove("msg-flash");
+        void flash.offsetWidth;
+        flash.classList.add("msg-flash");
+        if (blockIndex !== undefined) {
+          // data-block-idx 在外层包装 div 上；details（diff 卡/工具行）是它的子元素
+          const card = body.querySelector(
+            `[data-block-idx="${globalIndex}-${blockIndex}"] details`,
+          );
+          if (card) card.setAttribute("open", "");
+        }
+      };
+      if (needFrame) requestAnimationFrame(locate);
+      else locate();
+    },
+    [session, offset, messages, onToast],
+  );
+
+  // ---------- 变更文件聚合 ----------
+
+  const changedFiles = useMemo(() => {
+    const byPath = new Map<string, ChangedFile>();
+    messages.forEach((m, i) => {
+      m.blocks.forEach((b, bi) => {
+        if (b.kind !== "tool_use") return;
+        if (b.name !== "Edit" && b.name !== "Write" && b.name !== "MultiEdit") return;
+        const fp = ((b.input ?? {}) as Record<string, unknown>).file_path;
+        if (typeof fp !== "string" || !fp.trim()) return;
+        const existing = byPath.get(fp);
+        if (existing) {
+          existing.count += 1;
+          return;
+        }
+        const parts = fp.split(/[\\/]/);
+        const file = parts.pop() || fp;
+        byPath.set(fp, {
+          path: fp,
+          dir: parts.join("/"),
+          file,
+          msgIdx: i,
+          blockIdx: bi,
+          count: 1,
+        });
+      });
+    });
+    return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, "zh-Hans-CN"));
+  }, [messages]);
+
+  // 按目录分组展示
+  const fileGroups = useMemo(() => {
+    const groups = new Map<string, ChangedFile[]>();
+    for (const f of changedFiles) {
+      const key = f.dir || ".";
+      const list = groups.get(key) ?? [];
+      list.push(f);
+      groups.set(key, list);
+    }
+    return [...groups.entries()] as Array<[string, ChangedFile[]]>;
+  }, [changedFiles]);
+
+  // ---------- 导出 ----------
+
+  const doExport = useCallback(
+    async (format: "markdown" | "jsonl") => {
+      setExportMenuOpen(false);
+      if (!session) return;
+      const base =
+        (session.title || session.sessionId)
+          .replace(/[\\/:*?"<>|]/g, "_")
+          .split("\n")
+          .join(" ")
+          .trim()
+          .slice(0, 80) || session.sessionId;
+      try {
+        // 格式名（markdown/jsonl）与文件扩展名（md/jsonl）不同，导出对话框用扩展名
+        const ext = format === "markdown" ? "md" : "jsonl";
+        const dest = await save({
+          defaultPath: `${base}.${ext}`,
+          filters: [
+            {
+              name: format === "markdown" ? "Markdown 文档" : "JSON Lines",
+              extensions: [ext],
+            },
+          ],
+        });
+        if (!dest) return; // 用户取消
+        await api.exportSession(session.file, dest, format);
+        onToast(`已导出：${dest}`);
+      } catch (e) {
+        onToast("导出失败：" + String(e));
+      }
+    },
+    [session, onToast],
+  );
+
   if (!session) {
     return (
       <div className="viewer">
@@ -537,8 +791,54 @@ export default function SessionViewer({
             {projectPath ?? session.file}
             {total > 0 ? ` · 共 ${total} 条消息` : ""}
           </div>
+          {stats && stats.messageCount > 0 && (
+            <div className="viewer-stats">
+              总计 {fmtTokens(stats.totalTokens)} · 输入 {fmtTokens(stats.inputTokens)} · 输出{" "}
+              {fmtTokens(stats.outputTokens)}
+              {stats.cacheReadTokens > 0 && ` · 缓存读取 ${fmtTokens(stats.cacheReadTokens)}`}
+              {stats.costUsd > 0 && ` · ≈$${stats.costUsd.toFixed(2)}`}
+            </div>
+          )}
         </div>
         <div className="viewer-actions">
+          <button
+            className="btn"
+            onClick={() => {
+              setSearchOpen((v) => !v);
+              setExportMenuOpen(false);
+            }}
+            title="搜索消息内容与工具调用"
+          >
+            🔍 搜索
+          </button>
+          <button
+            className="btn"
+            onClick={() => setFilesOpen((v) => !v)}
+            title="本会话变更的文件列表"
+          >
+            📄 文件{changedFiles.length > 0 ? ` (${changedFiles.length})` : ""}
+          </button>
+          <div className="export-wrap">
+            <button
+              className="btn"
+              onClick={() => {
+                setExportMenuOpen((v) => !v);
+                setSearchOpen(false);
+              }}
+              title="导出会话内容"
+            >
+              导出 ▾
+            </button>
+            {exportMenuOpen && (
+              <>
+                <div className="menu-overlay" onClick={() => setExportMenuOpen(false)} />
+                <div className="export-menu">
+                  <button onClick={() => void doExport("markdown")}>Markdown 文档</button>
+                  <button onClick={() => void doExport("jsonl")}>JSONL（原文）</button>
+                </div>
+              </>
+            )}
+          </div>
           <button
             className="btn"
             onClick={() => setReloadKey((k) => k + 1)}
@@ -551,31 +851,116 @@ export default function SessionViewer({
           </button>
         </div>
       </div>
-      <div className="viewer-body" ref={bodyRef} onScroll={onScroll}>
-        {loading ? (
-          <div className="viewer-empty">加载中…</div>
-        ) : messages.length === 0 ? (
-          <div className="viewer-empty">
-            <div className="empty-icon">🗒</div>
-            <div>这个会话没有可显示的内容</div>
+
+      {searchOpen && (
+        <div className="viewer-search">
+          <input
+            className="search-input"
+            placeholder="搜索消息内容与工具调用…（Esc 关闭）"
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setSearchOpen(false);
+            }}
+            autoFocus
+          />
+          <span className="search-status">
+            {searching
+              ? "搜索中…"
+              : searchKeyword.trim() && searchResults
+                ? `${searchResults.length} 条结果`
+                : ""}
+          </span>
+          <button className="btn" onClick={() => setSearchOpen(false)} title="关闭搜索">
+            ✕
+          </button>
+          {searchKeyword.trim() && searchResults && searchResults.length > 0 && (
+            <div className="search-results" ref={resultsRef}>
+              {searchResults.slice(0, 50).map((h, i) => (
+                <button
+                  key={i}
+                  className="search-hit"
+                  onClick={() => void jumpTo(h.index, h.blockIndex)}
+                  title="点击跳转到对应消息"
+                >
+                  <span className={`search-kind ${h.kind === "user" ? "" : "sk-claude"}`}>
+                    {h.kind === "user" ? "用户" : "Claude"}
+                  </span>
+                  <span className="search-snippet">{h.snippet}</span>
+                </button>
+              ))}
+              {searchResults.length > 50 && (
+                <div className="search-more">
+                  仅显示前 50 条，共 {searchResults.length} 条
+                </div>
+              )}
+            </div>
+          )}
+          {searchKeyword.trim() && searchResults && searchResults.length === 0 && (
+            <div className="search-results search-empty">无匹配结果</div>
+          )}
+        </div>
+      )}
+
+      <div className="viewer-main">
+        <div className="viewer-body" ref={bodyRef} onScroll={onScroll}>
+          {loading ? (
+            <div className="viewer-empty">加载中…</div>
+          ) : messages.length === 0 ? (
+            <div className="viewer-empty">
+              <div className="empty-icon">🗒</div>
+              <div>这个会话没有可显示的内容</div>
+            </div>
+          ) : (
+            <>
+              {hasMore ? (
+                <button
+                  className="viewer-load-more"
+                  disabled={loadingMore}
+                  onClick={() => void loadMore()}
+                >
+                  {loadingMore ? "加载中…" : `↑ 加载更早的消息（还剩 ${offset} 条）`}
+                </button>
+              ) : offset > 0 ? (
+                <div className="viewer-truncated">已到会话开头</div>
+              ) : null}
+              {messages.map((m, i) => (
+                <Message key={i} msg={m} resultMap={resultMap} toolNames={toolNames} msgIndex={offset + i} />
+              ))}
+            </>
+          )}
+        </div>
+
+        {filesOpen && (
+          <div className="viewer-files">
+            <div className="files-head">
+              变更文件 <span className="files-count">{changedFiles.length}</span>
+            </div>
+            <div className="files-body">
+              {fileGroups.length === 0 ? (
+                <div className="files-empty">未发现文件变更</div>
+              ) : (
+                fileGroups.map(([dir, files]) => (
+                  <div className="file-group" key={dir}>
+                    <div className="file-dir" title={dir}>
+                      {dir}
+                    </div>
+                    {files.map((f) => (
+                      <button
+                        key={f.path}
+                        className="file-item"
+                        title={`${f.path}（点击定位）`}
+                        onClick={() => void jumpTo(offset + f.msgIdx, f.blockIdx)}
+                      >
+                        <span className="file-name">{f.file}</span>
+                        {f.count > 1 && <span className="file-count">{f.count}</span>}
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
-        ) : (
-          <>
-            {hasMore ? (
-              <button
-                className="viewer-load-more"
-                disabled={loadingMore}
-                onClick={() => void loadMore()}
-              >
-                {loadingMore ? "加载中…" : `↑ 加载更早的消息（还剩 ${offset} 条）`}
-              </button>
-            ) : offset > 0 ? (
-              <div className="viewer-truncated">已到会话开头</div>
-            ) : null}
-            {messages.map((m, i) => (
-              <Message key={i} msg={m} resultMap={resultMap} toolNames={toolNames} />
-            ))}
-          </>
         )}
       </div>
     </div>

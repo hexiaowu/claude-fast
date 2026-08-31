@@ -117,6 +117,17 @@ pub struct ContentBlock {
     is_error: Option<bool>,
 }
 
+/// 单条 assistant 消息的 token 用量（防御式解析：旧版数字字段与新版
+/// `input_tokens: {cache_read, cache_creation, input}` 嵌套对象都兼容）
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+}
+
 /// 会话中的一条消息（user / assistant）
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +138,28 @@ pub struct SessionMessage {
     timestamp: Option<String>,
     /// assistant 的模型名
     model: Option<String>,
+    /// assistant 的 token 用量（user 消息为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
+    /// 本消息成本（USD，jsonl 顶层 costUSD；缺失为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
+}
+
+/// 会话级 token / 成本统计（parse 全量消息后聚合，分页不影响准确性）
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageStats {
+    /// 会话总消息数
+    message_count: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    /// 总 token（输入 + 输出 + 缓存读取 + 缓存写入）
+    total_tokens: u64,
+    /// 总成本（USD，jsonl 的 costUSD 字段求和；缺失时为 0）
+    cost_usd: f64,
 }
 
 #[derive(Serialize)]
@@ -140,10 +173,29 @@ pub struct SessionMessages {
     total: usize,
     /// 本批起始位置（0 = 从最早一条开始）
     offset: usize,
+    /// 会话级 token / 成本统计
+    stats: SessionUsageStats,
+}
+
+/// 会话全文搜索的命中（一条命中 = 一个内容块）
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchHit {
+    /// 消息在会话中的全局序号（第一条实质消息 = 0）
+    index: usize,
+    /// 内容块在消息内的序号
+    block_index: usize,
+    /// user | assistant
+    kind: String,
+    /// 命中上下文：命中处前后各一段字符（单行化）
+    snippet: String,
 }
 
 /// 会话内容渲染的最大消息数（防止超大 jsonl 拖垮 UI）
 const MAX_SESSION_MESSAGES: usize = 500;
+
+/// 会话全文搜索的最多命中数（结果列表上限，防止超大 jsonl 拖垮 UI）
+const MAX_SEARCH_HITS: usize = 200;
 
 // ---------------- 路径定位 ----------------
 
@@ -1283,6 +1335,11 @@ fn parse_session_messages(content: &str) -> Vec<SessionMessage> {
                 .and_then(|t| t.as_str())
                 .map(|s| s.to_string()),
             model: msg.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()),
+            usage: parse_usage(msg.get("usage")),
+            cost_usd: v
+                .get("costUSD")
+                .and_then(|c| c.as_f64())
+                .or_else(|| msg.get("costUSD").and_then(|c| c.as_f64())),
         });
     }
     messages
@@ -1295,6 +1352,7 @@ fn slice_messages(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> SessionMessages {
+    let stats = aggregate_usage(&all);
     let total = all.len();
     let limit = limit.unwrap_or(MAX_SESSION_MESSAGES).clamp(1, 2000);
     let start = match offset {
@@ -1312,7 +1370,60 @@ fn slice_messages(
         has_more: start > 0,
         total,
         offset: start,
+        stats,
     }
+}
+
+/// 对全量消息聚合 token / 成本统计（usage 是解析时保留的，分页切片不影响准确性）
+fn aggregate_usage(messages: &[SessionMessage]) -> SessionUsageStats {
+    let mut stats = SessionUsageStats::default();
+    stats.message_count = messages.len();
+    for m in messages {
+        if let Some(u) = &m.usage {
+            stats.input_tokens += u.input_tokens;
+            stats.output_tokens += u.output_tokens;
+            stats.cache_read_tokens += u.cache_read_input_tokens;
+            stats.cache_creation_tokens += u.cache_creation_input_tokens;
+        }
+        if let Some(c) = m.cost_usd {
+            stats.cost_usd += c;
+        }
+    }
+    stats.total_tokens = stats.input_tokens
+        + stats.output_tokens
+        + stats.cache_read_tokens
+        + stats.cache_creation_tokens;
+    stats
+}
+
+/// 防御式解析 usage 字段（旧格式字段为数字；新格式 `input_tokens` 是
+/// `{cache_read, cache_creation, input}` 嵌套对象）。无 usage 返回 None。
+fn parse_usage(v: Option<&serde_json::Value>) -> Option<Usage> {
+    let obj = v?.as_object()?;
+    let num = |k: &str| obj.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let (input_tokens, cache_read, cache_creation) = match obj.get("input_tokens") {
+        Some(serde_json::Value::Number(n)) => (
+            n.as_u64().unwrap_or(0),
+            num("cache_read_input_tokens"),
+            num("cache_creation_input_tokens"),
+        ),
+        Some(serde_json::Value::Object(o)) => {
+            let read = |k: &str| o.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            (
+                read("input"),
+                // 新格式嵌套字段缺省时回退到顶层（部分版本两层都有）
+                read("cache_read").max(num("cache_read_input_tokens")),
+                read("cache_creation").max(num("cache_creation_input_tokens")),
+            )
+        }
+        _ => (num("input_tokens"), num("cache_read_input_tokens"), num("cache_creation_input_tokens")),
+    };
+    Some(Usage {
+        input_tokens,
+        output_tokens: num("output_tokens"),
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+    })
 }
 
 /// 读取会话内容（只读查看用，向上分页）。在 Tauri 线程池执行，不阻塞 UI。
@@ -1325,6 +1436,232 @@ async fn get_session_messages(
     let (path, _) = validate_session_file(&file)?;
     let content = fs::read_to_string(&path).map_err(|e| format!("读取会话文件失败：{e}"))?;
     Ok(slice_messages(parse_session_messages(&content), offset, limit))
+}
+
+// ---------------- 会话全文搜索（会话域增强包） ----------------
+
+/// 构造命中上下文片段：命中处前后各 radius 字节，回退到字符边界后切片。
+/// hit 字节偏移来自小写化后的文本（大小写折叠可能改变字节长度），
+/// floor/ceil_char_boundary 保证绝不 panic，偶发一两字符漂移可接受。
+fn make_snippet(text: &str, hit: usize, kw_len: usize, radius: usize) -> String {
+    let len = text.len();
+    let start = text.floor_char_boundary(hit.saturating_sub(radius).min(len));
+    let end = text.ceil_char_boundary((hit + kw_len + radius).min(len));
+    text[start..end].replace('\n', " ")
+}
+
+/// 搜索会话内容：text 块全文 + tool_use 的输入 JSON（file_path/command 等），
+/// 跳过 thinking / tool_result；大小写不敏感，按消息顺序返回，最多 MAX_SEARCH_HITS 条。
+fn search_session_messages_impl(content: &str, keyword: &str) -> Vec<SessionSearchHit> {
+    let kw = keyword.trim().to_lowercase();
+    if kw.is_empty() {
+        return Vec::new();
+    }
+    let messages = parse_session_messages(content);
+    let mut out = Vec::new();
+    'outer: for (index, m) in messages.iter().enumerate() {
+        for (block_index, b) in m.blocks.iter().enumerate() {
+            let hay = match b.kind.as_str() {
+                "text" => b.text.clone().unwrap_or_default(),
+                "tool_use" => {
+                    let mut s = b.name.clone().unwrap_or_default();
+                    if let Some(input) = &b.input {
+                        s.push(' ');
+                        s.push_str(&input.to_string());
+                    }
+                    s
+                }
+                _ => continue,
+            };
+            let lower = hay.to_lowercase();
+            let Some(hit) = lower.find(&kw) else {
+                continue;
+            };
+            out.push(SessionSearchHit {
+                index,
+                block_index,
+                kind: m.kind.clone(),
+                snippet: make_snippet(&hay, hit, kw.len(), 40),
+            });
+            if out.len() >= MAX_SEARCH_HITS {
+                break 'outer;
+            }
+        }
+    }
+    out
+}
+
+/// 会话全文搜索（关键词命中消息内容与工具调用输入）。在 Tauri 线程池执行。
+#[tauri::command]
+async fn search_session_messages(
+    file: String,
+    keyword: String,
+) -> Result<Vec<SessionSearchHit>, String> {
+    if keyword.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let (path, _) = validate_session_file(&file)?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("读取会话文件失败：{e}"))?;
+    Ok(search_session_messages_impl(&content, &keyword))
+}
+
+// ---------------- 会话导出（会话域增强包） ----------------
+
+/// 把 ISO 时间戳简化为「YYYY-MM-DD HH:MM」（非法/缺失返回空串）
+fn format_ts_display(iso: &str) -> String {
+    // ISO 时间戳为 ASCII，字节切片安全（长度不足直接放弃）
+    if iso.len() >= 16 && iso.as_bytes()[10] == b'T' {
+        format!("{} {}", &iso[..10], &iso[11..16])
+    } else {
+        String::new()
+    }
+}
+
+/// 工具摘要行（导出 Markdown 用，与前端 toolSummary 语义一致；input 不转储原文）
+fn tool_summary_line(name: &str, input: &Option<serde_json::Value>) -> String {
+    let obj = input.as_ref().and_then(|v| v.as_object());
+    let get = |k: &str| obj.and_then(|o| o.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    let leaf = |p: &str| p.split(['/', '\\']).last().unwrap_or(p).to_string();
+    let clip = |s: &str, n: usize| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() > n {
+            chars[..n].iter().collect::<String>() + "…"
+        } else {
+            s.to_string()
+        }
+    };
+    match name {
+        "Bash" => format!("Bash · {}", clip(get("command"), 120)),
+        "Read" => format!("Read · {}", leaf(get("file_path"))),
+        "Write" => format!("Write · {}", leaf(get("file_path"))),
+        "Edit" => format!("Edit · {}", leaf(get("file_path"))),
+        "MultiEdit" => format!("MultiEdit · {}", leaf(get("file_path"))),
+        "Glob" => format!("Glob · {}", get("pattern")),
+        "Grep" => format!("Grep · {}", get("pattern")),
+        "Agent" => format!("Agent · {}", get("description")),
+        "TodoWrite" => "TodoWrite · 更新任务列表".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 单条消息渲染为 Markdown 小节（导出用）：
+/// text 原样、thinking 压缩为引用块、tool_use 摘要行、tool_result 截断 200 字符。
+fn render_message_markdown(
+    msg: &SessionMessage,
+    tool_names: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = String::new();
+    let who = if msg.kind == "user" {
+        "用户".to_string()
+    } else {
+        match &msg.model {
+            Some(m) if !m.is_empty() => format!("Claude（{m}）"),
+            _ => "Claude".to_string(),
+        }
+    };
+    let ts = msg.timestamp.as_deref().map(format_ts_display).unwrap_or_default();
+    out.push_str("\n## ");
+    out.push_str(&who);
+    if !ts.is_empty() {
+        out.push_str(" · ");
+        out.push_str(&ts);
+    }
+    out.push('\n');
+    for b in &msg.blocks {
+        match b.kind.as_str() {
+            "text" => {
+                if let Some(t) = &b.text {
+                    out.push_str(t);
+                    out.push('\n');
+                }
+            }
+            "thinking" => out.push_str("> 💭 思考过程（省略）\n"),
+            "tool_use" => {
+                let line =
+                    tool_summary_line(b.name.as_deref().unwrap_or("工具"), &b.input);
+                out.push_str("🔧 ");
+                out.push_str(&line);
+                out.push('\n');
+            }
+            "tool_result" => {
+                let name = b
+                    .tool_use_id
+                    .as_deref()
+                    .and_then(|id| tool_names.get(id))
+                    .map(|s| s.as_str())
+                    .unwrap_or("工具");
+                let text = b.text.as_deref().unwrap_or("");
+                let chars: Vec<char> = text.chars().collect();
+                let body: String = if chars.len() > 200 {
+                    chars[..200].iter().collect::<String>() + "…"
+                } else {
+                    text.to_string()
+                };
+                out.push_str(&format!("📄 {name} 结果：{}\n", body.replace('\n', " ")));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 渲染整个会话为 Markdown（导出用；不走分页，全量渲染）
+fn render_session_markdown(messages: &[SessionMessage], title: &str) -> String {
+    // tool_use_id → 工具名（与查看器 toolNames 同语义，跨消息关联）
+    let mut tool_names = std::collections::HashMap::new();
+    for m in messages {
+        for b in &m.blocks {
+            if b.kind == "tool_use" {
+                if let Some(id) = &b.tool_use_id {
+                    tool_names.insert(id.clone(), b.name.clone().unwrap_or_default());
+                }
+            }
+        }
+    }
+    let title = title.trim();
+    let mut out = format!(
+        "# {}\n> 导出自 Claude助手 · {} 条消息\n",
+        if title.is_empty() { "未命名会话" } else { title },
+        messages.len()
+    );
+    for m in messages {
+        out.push_str(&render_message_markdown(m, &tool_names));
+    }
+    out
+}
+
+/// 生成导出内容（核心逻辑，供 command 与测试复用）：
+/// markdown = 渲染为文档；jsonl = 原样复制（保留原文，不做任何转换）。
+fn build_export_bytes(content: &str, format: &str, title: &str) -> Result<Vec<u8>, String> {
+    match format {
+        "markdown" => Ok(render_session_markdown(&parse_session_messages(content), title).into_bytes()),
+        "jsonl" => Ok(content.as_bytes().to_vec()),
+        other => Err(format!("不支持的导出格式：{other}")),
+    }
+}
+
+/// 导出会话到指定路径（markdown / jsonl）。在 Tauri 线程池执行，不阻塞 UI。
+/// 返回写入的字节数。
+#[tauri::command]
+async fn export_session(
+    file: String,
+    dest_path: String,
+    format: String,
+) -> Result<u64, String> {
+    let (path, session_id) = validate_session_file(&file)?;
+    let dest = PathBuf::from(&dest_path);
+    if dest == path {
+        return Err("导出目标不能是会话文件本身".to_string());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| format!("读取会话文件失败：{e}"))?;
+    let title = read_head_tail(&path)
+        .and_then(|(head, tail, _)| session_meta_from_lite(&head, &tail, &session_id, 0))
+        .map(|i| i.title)
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "未命名会话".to_string());
+    let bytes = build_export_bytes(&content, &format, &title)?;
+    fs::write(&dest, &bytes).map_err(|e| format!("写入导出文件失败：{e}"))?;
+    Ok(bytes.len() as u64)
 }
 
 /// 向会话 jsonl 追加 custom-title 行（核心逻辑，供 command 与测试复用）
@@ -2790,6 +3127,164 @@ mod tests {
         assert_eq!(manual.len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    // ---------------- 会话统计 / 搜索 / 导出（会话域增强包） ----------------
+
+    #[test]
+    fn usage_parses_old_and_new_formats() {
+        // 旧格式：usage 各字段直接是数字
+        let old: serde_json::Value =
+            serde_json::from_str(r#"{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}"#)
+                .unwrap();
+        let u = parse_usage(Some(&old)).unwrap();
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 20);
+        assert_eq!(u.cache_read_input_tokens, 5);
+        assert_eq!(u.cache_creation_input_tokens, 3);
+        // 新格式：input_tokens 是嵌套对象
+        let new: serde_json::Value = serde_json::from_str(
+            r#"{"input_tokens":{"cache_read":7,"cache_creation":2,"input":300},"output_tokens":40}"#,
+        )
+        .unwrap();
+        let u = parse_usage(Some(&new)).unwrap();
+        assert_eq!(u.input_tokens, 300);
+        assert_eq!(u.cache_read_input_tokens, 7);
+        assert_eq!(u.cache_creation_input_tokens, 2);
+        assert_eq!(u.output_tokens, 40);
+        // 无 usage → None
+        assert!(parse_usage(None).is_none());
+        // 用法字段缺失 → 默认 0
+        let empty: serde_json::Value = serde_json::from_str("{}").unwrap();
+        let u = parse_usage(Some(&empty)).unwrap();
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+    }
+
+    #[test]
+    fn parse_session_messages_aggregates_usage() {
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"你好"},"timestamp":"2026-08-12T06:47:46.519Z"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"你好！"}],"model":"claude-sonnet-4","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}},"timestamp":"2026-08-12T06:47:47.000Z","costUSD":0.0012}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"继续"}],"model":"claude-sonnet-4","usage":{"input_tokens":{"cache_read":7,"cache_creation":2,"input":300},"output_tokens":40}},"timestamp":"2026-08-12T06:47:48.000Z","costUSD":0.0035}"#,
+            r#"{"type":"mode","mode":"normal","sessionId":"x"}"#,
+        );
+        let messages = parse_session_messages(&jsonl);
+        assert_eq!(messages.len(), 3);
+        // user 消息无 usage；assistant 有
+        assert!(messages[0].usage.is_none());
+        assert!(messages[2].usage.is_some());
+        let stats = aggregate_usage(&messages);
+        assert_eq!(stats.message_count, 3);
+        assert_eq!(stats.input_tokens, 400);
+        assert_eq!(stats.output_tokens, 60);
+        assert_eq!(stats.cache_read_tokens, 12);
+        assert_eq!(stats.cache_creation_tokens, 5);
+        assert_eq!(stats.total_tokens, 477); // 400 + 60 + 12 + 5
+        assert!((stats.cost_usd - 0.0047).abs() < 1e-9);
+        // 分页统计不受切片影响
+        let paged = slice_messages(messages, None, Some(2));
+        assert_eq!(paged.messages.len(), 2);
+        assert_eq!(paged.stats.input_tokens, 400);
+        assert_eq!(paged.stats.message_count, 3);
+    }
+
+    #[test]
+    fn search_session_hits_text_and_tool_input() {
+        let jsonl = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"帮我检查 AuthService 的登录逻辑"},"timestamp":"t1"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"我来看看 AuthService"},{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"src/AuthService.ts"}},{"type":"thinking","thinking":"lorem ipsum"}],"model":"m"},"timestamp":"t2"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"检查一下地址校验吧"},"timestamp":"t3"}"#,
+        );
+        let hits = search_session_messages_impl(&jsonl, "authservice");
+        // 用户消息 1 处 + assistant text 1 处 + tool_use 输入 1 处（大小写不敏感）
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].index, 0);
+        assert_eq!(hits[0].kind, "user");
+        assert_eq!(hits[1].index, 1);
+        assert_eq!(hits[1].block_index, 0);
+        assert_eq!(hits[2].block_index, 1); // tool_use 块
+        assert!(hits[2].snippet.to_lowercase().contains("authservice"));
+        // thinking 不参与搜索
+        assert!(search_session_messages_impl(&jsonl, "lorem").is_empty());
+        // 无结果 / 空白关键词
+        assert!(search_session_messages_impl(&jsonl, "不存在的词 XYZ").is_empty());
+        assert!(search_session_messages_impl(&jsonl, "  ").is_empty());
+    }
+
+    #[test]
+    fn make_snippet_never_panics_on_boundaries() {
+        let text = "你好，这是一段中文测试文本，用于验证搜索片段是否安全。";
+        // 命中 0 字节处（关键词恰好从开头）→ 片段以关键词开头且不超原文
+        let s = make_snippet(text, 0, "你好".len(), 40);
+        assert!(s.starts_with("你好"));
+        assert!(s.len() <= text.len());
+        // 命中在末尾（超出范围自动收敛，不 panic）
+        let s = make_snippet(text, text.len(), 1, 40);
+        assert!(s.len() <= text.len());
+        // 命中在文本中间（字节位置落在 UTF-8 边界内，floor/ceil 收敛）
+        let s = make_snippet(text, 9, 3, 4);
+        assert!(!s.is_empty());
+        assert!(s.len() <= text.len());
+        // 命中位置大于文本长度（lowercase 字节漂移的极端情况）：收敛为合法片段，不 panic
+        let s = make_snippet(text, text.len() + 10, 2, 3);
+        assert!(s.is_empty() || s.len() <= text.len());
+    }
+
+    #[test]
+    fn render_session_markdown_outputs_expected_sections() {
+        let jsonl = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"你好"},"timestamp":"2026-08-12T06:47:46.519Z"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"你好！有什么可以帮你？"},{"type":"thinking","thinking":"考虑中"},{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"src/a.ts","old_string":"x","new_string":"y"}}],"model":"claude-sonnet-4"},"timestamp":"2026-08-12T06:47:47.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"编辑成功","is_error":false}]},"timestamp":"2026-08-12T06:47:48.000Z"}"#,
+        );
+        let messages = parse_session_messages(&jsonl);
+        let md = render_session_markdown(&messages, "测试会话");
+        assert!(md.starts_with("# 测试会话"), "{md}");
+        assert!(md.contains("## 用户 · 2026-08-12 06:47"), "{md}");
+        assert!(md.contains("## Claude（claude-sonnet-4） · 2026-08-12 06:47"), "{md}");
+        assert!(md.contains("你好！有什么可以帮你？"));
+        assert!(md.contains("> 💭 思考过程（省略）"));
+        // Edit 工具：leaf 文件名摘要
+        assert!(md.contains("🔧 Edit · a.ts"), "{md}");
+        // tool_result 关联到 tool_use 名
+        assert!(md.contains("📄 Edit 结果：编辑成功"), "{md}");
+        // 长文本截断
+        let long = format!(
+            "{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"开始"},"timestamp":"t1"}"#,
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"tu1","content":"{}","is_error":false}}]}},"timestamp":"t2"}}"#,
+                "x".repeat(500)
+            ),
+        );
+        let md2 = render_session_markdown(&parse_session_messages(&long), "t");
+        assert!(md2.contains("…"));
+    }
+
+    #[test]
+    fn export_bytes_markdown_and_jsonl() {
+        let jsonl = format!(
+            "{}\n{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"你好"},"timestamp":"t1"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"你好！"}],"model":"m"},"timestamp":"t2"}"#,
+        );
+        // markdown：渲染为文档
+        let md = String::from_utf8(build_export_bytes(&jsonl, "markdown", "导出标题").unwrap())
+            .unwrap();
+        assert!(md.contains("# 导出标题"));
+        assert!(md.contains("## 用户"));
+        assert!(md.contains("## Claude"));
+        // jsonl：原样复制（保真）
+        assert_eq!(
+            build_export_bytes(&jsonl, "jsonl", "t").unwrap(),
+            jsonl.as_bytes()
+        );
+        // 未知格式报错
+        assert!(build_export_bytes(&jsonl, "pdf", "t").is_err());
+    }
 }
 
 /// 退出程序（托盘菜单/前端调用；绕过关闭拦截直接退出）
@@ -2887,6 +3382,8 @@ pub fn run() {
             purge_session,
             purge_trash,
             get_session_messages,
+            search_session_messages,
+            export_session,
             resume_session,
             get_data_root,
             autostart_supported,
