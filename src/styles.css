@@ -204,9 +204,12 @@ code {
   position: absolute;
   left: 10px;
   top: 50%;
-  transform: translateY(-52%);
+  /* 内容为对称 SVG：grid 收紧行盒后 -50% 精确居中（原 -52% 是 ⌕ 字形墨迹补偿） */
+  display: grid;
+  place-items: center;
+  line-height: 0;
+  transform: translateY(-50%);
   color: var(--dim);
-  font-size: 16px;
   pointer-events: none;
 }
 
@@ -259,6 +262,7 @@ code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px; /* 图标（SVG）与文字间距；纯文字按钮单项不受影响 */
   line-height: 1;
   /* 中文字体（YaHei）ascent/descent 不对称导致墨迹视觉偏上 ~1px，
      上下 padding 各让 1px 补偿（总高不变，内容下移） */
@@ -281,6 +285,12 @@ code {
 .btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* .btn 内的 SVG 图标：flex 居中于行盒中心，但 YaHei 文字墨迹偏上 ~1px
+   （即上方 padding 补偿的同一现象），图标需上移 1px 与文字墨迹对齐 */
+.btn svg {
+  transform: translateY(-1px);
 }
 
 .btn-primary {
@@ -551,11 +561,14 @@ code {
   background: var(--accent-soft);
 }
 
-/* 重命名铅笔：系统字体中 ✏ 笔尖默认朝右，顺时针 135° 转为朝左下；
-   旋转只作用于字符 span，按钮 hover 高亮背景保持正常方形 */
-.session-edit-icon {
-  display: inline-block;
-  transform: rotate(135deg);
+/* 会话行操作按钮内容为线性 SVG 图标：grid + line-height:0 居中
+   （铁律表该组合墨迹无偏移；SVG 描边本身对称，无需不对称 padding 补偿） */
+.session-edit,
+.session-del,
+.session-resume {
+  display: grid;
+  place-items: center;
+  line-height: 0;
 }
 
 .session-del:hover {

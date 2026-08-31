@@ -110,7 +110,7 @@ export default function StatsDialog({ onClose }: Props) {
   const maxModelTokens = stats?.perModel[0]?.tokens ?? 1;
 
   return (
-    <Modal title="📊 使用统计" width={660} onClose={onClose}>
+    <Modal title="使用统计" width={660} onClose={onClose}>
       <div className="stats-toolbar">
         <div className="stats-range">
           {RANGE_LABELS.map(([r, label]) => (

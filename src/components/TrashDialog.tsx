@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { TrashedSession } from "../types";
 import Modal from "./Modal";
+import { TrashIcon } from "./Icons";
 
 interface Props {
   onClose: () => void;
@@ -86,7 +87,9 @@ export default function TrashDialog({ onClose, onChanged, onToast }: Props) {
           <div className="session-empty">加载中…</div>
         ) : items.length === 0 ? (
           <div className="trash-empty">
-            <div className="empty-icon">🗑</div>
+            <div className="empty-icon">
+              <TrashIcon size={34} />
+            </div>
             <div>回收站是空的</div>
             <div className="empty-sub">删除的会话会移到这里，可随时恢复</div>
           </div>

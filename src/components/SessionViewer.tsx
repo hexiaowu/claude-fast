@@ -3,6 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
+import { FileIcon, PlayIcon, SearchIcon } from "./Icons";
 import type {
   ContentBlock,
   SessionInfo,
@@ -808,14 +809,16 @@ export default function SessionViewer({
             }}
             title="搜索消息内容与工具调用"
           >
-            🔍 搜索
+            <SearchIcon />
+            搜索
           </button>
           <button
             className="btn"
             onClick={() => setFilesOpen((v) => !v)}
             title="本会话变更的文件列表"
           >
-            📄 文件{changedFiles.length > 0 ? ` (${changedFiles.length})` : ""}
+            <FileIcon />
+            文件{changedFiles.length > 0 ? ` (${changedFiles.length})` : ""}
           </button>
           <div className="export-wrap">
             <button
@@ -846,7 +849,8 @@ export default function SessionViewer({
             刷新
           </button>
           <button className="btn btn-primary" onClick={onResume} title="新开窗口继续这个对话">
-            ▶ 继续对话
+            <PlayIcon />
+            继续
           </button>
         </div>
       </div>

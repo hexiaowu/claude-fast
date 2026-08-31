@@ -1,3 +1,5 @@
+import { BarChartIcon, SearchIcon, TrashIcon } from "./Icons";
+
 interface Props {
   search: string;
   onSearch: (v: string) => void;
@@ -13,7 +15,9 @@ export default function Toolbar(props: Props) {
   return (
     <div className="toolbar">
       <div className="search-box">
-        <span className="search-icon">⌕</span>
+        <span className="search-icon">
+          <SearchIcon size={15} />
+        </span>
         <input
           className="search-input"
           placeholder="搜索项目名或路径…"
@@ -38,10 +42,12 @@ export default function Toolbar(props: Props) {
           健康检查
         </button>
         <button className="btn" onClick={onTrash} title="删除的会话在这里，可恢复">
-          🗑 回收站
+          <TrashIcon />
+          回收站
         </button>
         <button className="btn" onClick={onStats} title="token 用量 / 成本 / 模型分布统计">
-          📊 统计
+          <BarChartIcon />
+          统计
         </button>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import type { DragEvent } from "react";
 import type { Project, SessionInfo } from "../types";
+import { PencilIcon, PlayIcon, TrashIcon } from "./Icons";
 
 interface Props {
   items: Project[];
@@ -234,7 +235,7 @@ export default function ProjectList({
                           onResumeSession(l.key, s);
                         }}
                       >
-                        ▶
+                        <PlayIcon />
                       </button>
                       <button
                         className="session-rename session-edit"
@@ -244,7 +245,7 @@ export default function ProjectList({
                           onRenameSession(l.key, s);
                         }}
                       >
-                        <span className="session-edit-icon">✏</span>
+                        <PencilIcon />
                       </button>
                       <button
                         className="session-rename session-del"
@@ -254,7 +255,7 @@ export default function ProjectList({
                           onDeleteSession(l.key, s);
                         }}
                       >
-                        🗑
+                        <TrashIcon />
                       </button>
                     </div>
                   ))
