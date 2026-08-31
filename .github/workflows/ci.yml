@@ -45,6 +45,11 @@ jobs:
         working-directory: src-tauri
         shell: bash
         run: |
-          grep -nE "^error|error\[|panicked at|FAILED" cargo-test.log | head -30 | while IFS= read -r line; do
+          {
+            echo "cargo=$(command -v cargo || echo MISSING)"
+            echo "log_size=$(wc -c < cargo-test.log 2>/dev/null || echo NOFILE)"
+            echo "---- tail of cargo-test.log ----"
+            tail -n 30 cargo-test.log 2>/dev/null
+          } | while IFS= read -r line; do
             echo "::error::${line:0:400}"
           done
