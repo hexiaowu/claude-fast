@@ -759,7 +759,9 @@ mark {
   background: var(--panel);
 }
 
-.search-input {
+/* 作用域限定在查看器搜索条：不能裸写 .search-input，会覆盖工具栏
+   搜索框（同名类）的 padding-left: 30px，导致文字与放大镜图标重叠 */
+.viewer-search .search-input {
   flex: 1;
   min-width: 0;
   padding: 7px 12px;
@@ -772,7 +774,7 @@ mark {
   transition: border-color 0.12s;
 }
 
-.search-input:focus {
+.viewer-search .search-input:focus {
   border-color: var(--accent);
 }
 
