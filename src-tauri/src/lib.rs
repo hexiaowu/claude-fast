@@ -2048,11 +2048,9 @@ mod tests {
     #[test]
     fn resolve_root_finds_project() {
         let root = resolve_root_dir();
-        // 新布局：config.json + scripts/ 子目录
-        assert!(root.join("config.json").is_file());
+        // 便携模式（开发目录）与安装模式（数据目录）的公共不变量：scripts/ 必在
+        // （安装模式幂等创建；config.json 只在首次保存配置后出现，全新环境无，不在此断言）
         assert!(root.join(SCRIPTS_DIR).is_dir());
-        // 兼容旧标记
-        assert!(is_root_dir(&root));
     }
 
     #[test]
@@ -2065,8 +2063,8 @@ mod tests {
         // 只有 config.json 没有 scripts 目录 → 不是根
         fs::remove_dir_all(root.join(SCRIPTS_DIR)).unwrap();
         assert!(!is_root_dir(&root));
-        // 旧布局：claude-claude-fast.bat
-        fs::write(root.join("claude-claude-fast.bat"), "").unwrap();
+        // 旧布局：claude-claude-fast.<ext>（标记名随平台 bat/sh）
+        fs::write(root.join(legacy_marker()), "").unwrap();
         assert!(is_root_dir(&root));
         fs::remove_dir_all(&root).unwrap();
     }
@@ -2735,14 +2733,16 @@ mod tests {
         let real = Path::new(&root).join("real_proj");
         fs::create_dir_all(&real).unwrap();
 
+        // 不存在的路径按平台取样式（叶子名提取随平台分隔符）
+        let ghost = if cfg!(windows) { "D:\\ghost\\path" } else { "/ghost/path" };
         let list = list_projects_impl(
             &projects,
-            &[real.to_str().unwrap().to_string(), "D:\\ghost\\path".to_string()],
+            &[real.to_str().unwrap().to_string(), ghost.to_string()],
             &[],
         );
         // 会话目录为空 → 只有手动项；大小写不敏感去重后 2 条
         assert_eq!(list.len(), 2);
-        let delta = list.iter().find(|x| x.path == "D:\\ghost\\path").unwrap();
+        let delta = list.iter().find(|x| x.path == ghost).unwrap();
         assert!(delta.missing);
         assert_eq!(delta.name, "path");
         let real_item = list.iter().find(|x| x.path == real.to_str().unwrap()).unwrap();
@@ -2753,17 +2753,30 @@ mod tests {
     #[test]
     fn legacy_config_migrates_to_projects() {
         let root = temp_root("proj-migrate");
-        // 旧脚本：claude-oldproj.bat 指向 D:\legacy\proj；claude-dead.bat 指向不存在目录
+        // 旧脚本指向的项目路径（脚本格式随平台：bat 用 cd /d，sh 用 cd "..."）
+        let (proj, dead) = if cfg!(windows) {
+            ("D:\\legacy\\proj", "D:\\legacy\\dead")
+        } else {
+            ("/legacy-migrate-test/proj", "/legacy-migrate-test/dead")
+        };
+        let mk_script = |p: &str| {
+            if cfg!(windows) {
+                format!("@echo off\r\ncd /d \"{p}\"")
+            } else {
+                format!("cd \"{p}\"")
+            }
+        };
+        // 旧脚本：claude-oldproj 指向 proj；claude-dead 指向不存在目录
         let scripts = root.join("scripts");
         fs::create_dir_all(&scripts).unwrap();
         fs::write(
-            scripts.join("claude-oldproj.bat"),
-            "@echo off\r\ncd /d \"D:\\legacy\\proj\"",
+            scripts.join(format!("claude-oldproj.{}", script_ext())),
+            mk_script(proj),
         )
         .unwrap();
         fs::write(
-            scripts.join("claude-dead.bat"),
-            "@echo off\r\ncd /d \"D:\\legacy\\dead\"",
+            scripts.join(format!("claude-dead.{}", script_ext())),
+            mk_script(dead),
         )
         .unwrap();
         // 旧版 config：favorites 存脚本 key、无 projects 字段
@@ -2777,16 +2790,10 @@ mod tests {
 
         let migrated = load_config_from(&root);
         // projects = 全部脚本路径（顺序按解析序，包含已失效的）
-        assert!(migrated
-            .projects
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case("D:\\legacy\\proj")));
-        assert!(migrated
-            .projects
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case("D:\\legacy\\dead")));
+        assert!(migrated.projects.iter().any(|p| p.eq_ignore_ascii_case(proj)));
+        assert!(migrated.projects.iter().any(|p| p.eq_ignore_ascii_case(dead)));
         // favorites = 旧收藏 key 映射后的路径；unknown 找不到被丢弃
-        assert_eq!(migrated.favorites, vec!["D:\\legacy\\proj"]);
+        assert_eq!(migrated.favorites, vec![proj.to_string()]);
         // 幂等：二次调用不再变化
         ensure_projects_migrated_in(&root);
         let again = load_config_from(&root);
