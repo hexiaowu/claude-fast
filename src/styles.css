@@ -998,7 +998,8 @@ mark {
 .stats-range button {
   border: none;
   background: none;
-  padding: 6px 12px;
+  /* normal 行高下 YaHei 墨迹偏下 ~1px，减小上 padding 让内容上移 1px（总高不变） */
+  padding: 5px 12px 7px;
   font-size: 12px;
   color: var(--muted);
   cursor: pointer;
@@ -1092,7 +1093,8 @@ mark {
   border: 1px solid var(--border);
   background: var(--panel);
   border-radius: 999px;
-  padding: 2px 10px;
+  /* 同 stats-range：墨迹偏下补偿 */
+  padding: 1px 10px 3px;
   font-size: 11px;
   color: var(--muted);
   cursor: pointer;
