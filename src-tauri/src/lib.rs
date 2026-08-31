@@ -2733,14 +2733,16 @@ mod tests {
         let real = Path::new(&root).join("real_proj");
         fs::create_dir_all(&real).unwrap();
 
+        // 不存在的路径按平台取样式（叶子名提取随平台分隔符）
+        let ghost = if cfg!(windows) { "D:\\ghost\\path" } else { "/ghost/path" };
         let list = list_projects_impl(
             &projects,
-            &[real.to_str().unwrap().to_string(), "D:\\ghost\\path".to_string()],
+            &[real.to_str().unwrap().to_string(), ghost.to_string()],
             &[],
         );
         // 会话目录为空 → 只有手动项；大小写不敏感去重后 2 条
         assert_eq!(list.len(), 2);
-        let delta = list.iter().find(|x| x.path == "D:\\ghost\\path").unwrap();
+        let delta = list.iter().find(|x| x.path == ghost).unwrap();
         assert!(delta.missing);
         assert_eq!(delta.name, "path");
         let real_item = list.iter().find(|x| x.path == real.to_str().unwrap()).unwrap();
