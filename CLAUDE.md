@@ -71,6 +71,14 @@
 - **绝不删除数据根的 `config.json` / `.bak`**——用户收藏在这里。`save_config` 三步保护：写临时文件 → 旧文件备份为 `.bak` → 原子替换；`load_config` 读主文件失败时自动从 `.bak` 回退。
 - ⚠️ **必须用 `npm run tauri build`（或 `npx tauri build`）构建，禁止直接 `cargo build --release`**：只有 tauri CLI 自动加 `--features tauri/custom-protocol`，缺它产物是 dev 模式，运行时连 `http://localhost:1420` 白屏。
 - 国内网络首次构建需 crates.io 镜像（用户 `~/.cargo/config.toml` 已配 rsproxy.cn）。
+- **新增任何按钮类必须做墨迹居中补偿，并放大目检/实测**（历史规律：每加新按钮都漏这条被用户发现）。中文字体 YaHei 的字形墨迹与行盒中心不重合，偏移方向由 line-height 决定：
+  | line-height 设定 | 墨迹偏移 | 补偿（总高不变） | 已验证基准类 |
+  |---|---|---|---|
+  | `1`（配合 inline-flex 居中） | 偏上 ~1px | **padding-top +1 / bottom −1** | `.btn`（`10px 14px 8px`）、`.icon-btn`、`.pill` |
+  | 不设（normal） | 偏下 1~2px | **padding-top −1~−2 / bottom 相应加** | `.stats-range button`（`5px 12px 7px`）、`.stat-sort button`（`1px 10px 3px`） |
+  | `0`（配合 grid place-items） | 无偏移 | 无需补偿 | `.row-icon` |
+
+  规则：① 新按钮必须 `inline-flex + align/justify-content: center` 或 `grid + place-items: center`（禁止单靠默认 inline 排版）；② 按上表加不对称 padding 并写注释「墨迹补偿，勿改对称」；③ 例外：`⚙` 齿轮等字形本身歪的另加 `transform` 微调（参考 `.icon-gear`）；④ **已补偿的类严禁改回对称 padding**；⑤ 验证方式：DPR 整数倍截图后放大看上下空隙，或 CDP `Page.captureScreenshot` + 像素扫描墨迹 bbox（上下空隙差 ≤1px 为达标）。
 
 ## 开发命令
 
