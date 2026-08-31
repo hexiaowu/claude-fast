@@ -1873,7 +1873,10 @@ fn file_usage_cached(path: &Path, tz_offset_minutes: i64) -> Option<FileUsage> {
 /// projects: (显示名, 真实路径, 项目目录) 列表；日期按 tz_offset_minutes 归属本地时区。
 fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes: i64) -> UsageStats {
     let mut stats = UsageStats::default();
-    // 当天活跃会话去重（跨文件）：date -> sessionId 集合
+    // 每日会话数（date -> sessionId 集合）：会话归属其**最后活跃日**，
+    // 跨天会话只计一次——任意日期窗口内每日 sessions 累加恰好等于窗口内
+    // 去重会话数，与「全部」的 stats.sessions 口径一致（否则跨天会话在
+    // 窗口内被重复计入，出现「全部比近 30 天还少」的反直觉结果）
     let mut day_sessions: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
     let mut day_map: std::collections::BTreeMap<String, (u64, usize)> =
@@ -1921,8 +1924,12 @@ fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes:
                 let dm = day_map.entry(d.clone()).or_default();
                 dm.0 += t;
                 dm.1 += m;
+            }
+            // token/消息按天累加，但会话数只记到 per_day 的最后一天
+            // （BTreeMap 末 key = 最后活跃日）
+            if let Some(last_day) = u.per_day.keys().next_back() {
                 day_sessions
-                    .entry(d.clone())
+                    .entry(last_day.clone())
                     .or_default()
                     .insert(session_id.to_string());
             }
@@ -3700,6 +3707,48 @@ mod tests {
         assert_eq!(stats.input_tokens, 150);
         assert_eq!(stats.output_tokens, 30);
         assert_eq!(stats.message_count, 3);
+    }
+
+    /// 跨天会话的每日会话数只归属最后活跃日：任意窗口内每日累加 = 去重会话数，
+    /// 不会出现「全部比近 30 天还少」（跨天重复计入）的回归
+    #[test]
+    fn per_day_sessions_attributed_to_last_active_day() {
+        let root = temp_root("stats-lastday");
+        let pa = root.join("projects").join("D--work-alpha");
+        fs::create_dir_all(&pa).unwrap();
+        let line = |ts: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"x"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":{tokens},"output_tokens":1}}}},"timestamp":"{ts}"}}"#,
+            )
+        };
+        // 会话 A 跨两天（08-12 与 08-13 各有消息）；会话 B 只在 08-12
+        fs::write(
+            pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl"),
+            line("2026-08-12T01:00:00.000Z", 100)
+                + "\n"
+                + &line("2026-08-13T01:00:00.000Z", 50),
+        )
+        .unwrap();
+        fs::write(
+            pa.join("bbbbbbbb-2222-4222-8222-222222222222.jsonl"),
+            line("2026-08-12T02:00:00.000Z", 200),
+        )
+        .unwrap();
+
+        let projects = vec![("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone())];
+        let s = aggregate_stats_in(&projects, 0);
+        assert_eq!(s.sessions, 2);
+        // 08-12 只有会话 B（A 归属其最后活跃日 08-13）；token/消息仍按实际发生日累加
+        assert_eq!(s.per_day[0].date, "2026-08-12");
+        assert_eq!(s.per_day[0].sessions, 1);
+        assert_eq!(s.per_day[0].tokens, 302);
+        assert_eq!(s.per_day[0].messages, 2);
+        assert_eq!(s.per_day[1].date, "2026-08-13");
+        assert_eq!(s.per_day[1].sessions, 1);
+        assert_eq!(s.per_day[1].tokens, 51);
+        // 全时段每日累加 == 去重会话数（与「全部」口径一致）
+        assert_eq!(s.per_day.iter().map(|d| d.sessions).sum::<usize>(), s.sessions);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

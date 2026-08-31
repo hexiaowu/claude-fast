@@ -40,7 +40,9 @@ function StatCard({ num, label, sub }: { num: string; label: string; sub?: strin
 }
 
 /** 使用统计仪表盘：汇总卡 / 每日趋势 / 项目排行 / 模型分布。
- *  时间范围切换只作用于汇总卡与趋势图；排行与模型分布始终为全部时间。 */
+ *  时间范围切换只作用于汇总卡与趋势图；排行与模型分布始终为全部时间。
+ *  会话数口径：每日值 = 当日最后活跃的会话数（跨天会话只计一次），
+ *  因此任一范围窗口内累加 = 窗口内去重会话数，不会出现「全部 < 近30天」。 */
 export default function StatsDialog({ onClose }: Props) {
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -173,7 +175,7 @@ export default function StatsDialog({ onClose }: Props) {
                     key={d.date}
                     className="stat-bar"
                     style={{ height: `${Math.max((d.tokens / maxDayTokens) * 100, 2)}%` }}
-                    title={`${d.date} · ${fmtTokens(d.tokens)} token · ${d.sessions} 个会话`}
+                    title={`${d.date} · ${fmtTokens(d.tokens)} token · ${d.sessions} 个会话（最后活跃）`}
                   />
                 ))}
               </div>

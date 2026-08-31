@@ -142,7 +142,8 @@ export interface DailyUsage {
   /** YYYY-MM-DD */
   date: string;
   tokens: number;
-  /** 当天有消息的会话数（按会话去重） */
+  /** 归属到该日的会话数：会话按**最后活跃日**归属，跨天会话只计一次，
+   *  任意日期窗口内累加 = 窗口内去重会话数（与全部范围的总会话数口径一致） */
   sessions: number;
   messages: number;
 }
