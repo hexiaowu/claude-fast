@@ -25,9 +25,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # 先构建前端：tauri 的 build.rs 校验 frontendDist（../dist）必须存在，而 dist/ 被 gitignore
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - run: cargo test
+      - name: cargo test
         working-directory: src-tauri
+        shell: bash
+        run: cargo test 2>&1 | tee cargo-test.log; exit ${PIPESTATUS[0]}
+      - name: 失败时输出错误摘要（annotation，便于无权限读取日志）
+        if: failure()
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          grep -nE "^error|error\[|panicked at|FAILED" cargo-test.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line:0:400}"
+          done
