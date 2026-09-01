@@ -1837,26 +1837,29 @@ fn scan_file_usage(content: &str, tz_offset_minutes: i64) -> FileUsage {
     u
 }
 
-/// 文件级用量缓存（mtime + 时区偏移失效）：弹窗反复打开时只有变更过的
-/// jsonl 需要重扫；per_day 已是本地时区日期，时区变化也会触发重扫
+/// 文件级用量缓存（mtime + size + 时区偏移失效）：弹窗反复打开时只有变更过的
+/// jsonl 需要重扫；per_day 已是本地时区日期，时区变化也会触发重扫。size 必
+/// 参与判失效——快速连续写入可能落在同一毫秒内（mtime 相同而内容已变，CI 快
+/// 速环境必现），与台账「mtime+size 未变才跳过」的口径保持一致
 static USAGE_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, i64, FileUsage)>>,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64, i64, FileUsage)>>,
 > = std::sync::OnceLock::new();
 
 /// 读取（必要时扫描）一个 jsonl 的用量，带 mtime 缓存
 fn file_usage_cached(path: &Path, tz_offset_minutes: i64) -> Option<FileUsage> {
     let cache = USAGE_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mtime = fs::metadata(path)
-        .ok()?
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
         .modified()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
+    let size = meta.len();
     if let Ok(cache) = cache.lock() {
-        if let Some((t, tz, u)) = cache.get(path) {
-            if *t == mtime && *tz == tz_offset_minutes {
+        if let Some((t, s, tz, u)) = cache.get(path) {
+            if *t == mtime && *s == size && *tz == tz_offset_minutes {
                 return Some(u.clone());
             }
         }
@@ -1864,7 +1867,7 @@ fn file_usage_cached(path: &Path, tz_offset_minutes: i64) -> Option<FileUsage> {
     let content = fs::read_to_string(path).ok()?;
     let u = scan_file_usage(&content, tz_offset_minutes);
     if let Ok(mut cache) = cache.lock() {
-        cache.insert(path.to_path_buf(), (mtime, tz_offset_minutes, u.clone()));
+        cache.insert(path.to_path_buf(), (mtime, size, tz_offset_minutes, u.clone()));
     }
     Some(u)
 }
@@ -3968,7 +3971,13 @@ mod tests {
     #[test]
     fn stats_ledger_drops_excluded_project_history() {
         let root = temp_root("ledger-excl");
-        let pa = root.join("projects").join("D--work-alpha");
+        // mangled 目录名与真实路径按平台取（unmangle 随平台：Windows 盘符 X--、macOS 根 -）
+        let (mangled, real_path) = if cfg!(windows) {
+            ("D--work-alpha", "D:\\work\\alpha")
+        } else {
+            ("-work-alpha", "/work/alpha")
+        };
+        let pa = root.join("projects").join(mangled);
         fs::create_dir_all(&pa).unwrap();
         let line = |ts: &str, tokens: u64| {
             format!(
@@ -3980,14 +3989,14 @@ mod tests {
             line("2026-08-12T01:00:00.000Z", 100),
         )
         .unwrap();
-        let projects = vec![("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone())];
+        let projects = vec![("alpha".to_string(), real_path.to_string(), pa.clone())];
         let mut ledger = StatsLedger::default();
         let s1 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
         assert_eq!(s1.sessions, 1);
 
         // 项目被排除（含文件已删除的历史条目）
         fs::remove_file(pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl")).unwrap();
-        let excluded = vec!["D:\\work\\alpha".to_string()];
+        let excluded = vec![real_path.to_string()];
         let s2 = aggregate_stats_ledger(&projects, &excluded, 0, &mut ledger);
         assert_eq!(s2.sessions, 0);
         assert!(s2.per_project.is_empty());
