@@ -28,6 +28,26 @@ function shortModel(m: string): string {
   return m.replace(/-20\d{6,8}.*$/, "");
 }
 
+/** 本地日期 YYYY-MM-DD（后端 perDay 按前端传的时区偏移归属，与本函数同钟同区） */
+function localDateStr(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 严格日历窗口起始日：含今天往前推 nDays 个自然日（近 7 天 → 今天-6） */
+function windowStart(nDays: number): string {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0); // 正午锚定，规避夏令时切换日的日期偏移
+  d.setDate(d.getDate() - (nDays - 1));
+  return localDateStr(d);
+}
+
+/** 日期字符串 +k 天（YYYY-MM-DD，按本地日历，自动进位月/年） */
+function addDaysStr(date: string, k: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  return localDateStr(new Date(y, m - 1, d + k));
+}
+
 /** 汇总卡 */
 function StatCard({ num, label, sub }: { num: string; label: string; sub?: string }) {
   return (
@@ -41,6 +61,8 @@ function StatCard({ num, label, sub }: { num: string; label: string; sub?: strin
 
 /** 使用统计仪表盘：汇总卡 / 每日趋势 / 项目排行 / 模型分布。
  *  时间范围切换只作用于汇总卡与趋势图；排行与模型分布始终为全部时间。
+ *  近 N 天 = 严格日历窗口：含今天往前 N 个自然日，无用量日计 0 占位
+ *  （趋势图柱距与日历时间成正比）；全部 = 所有有数据的日子。
  *  会话数口径：每日值 = 当日最后活跃的会话数（跨天会话只计一次），
  *  因此任一范围窗口内累加 = 窗口内去重会话数，不会出现「全部 < 近30天」。 */
 export default function StatsDialog({ onClose }: Props) {
@@ -71,11 +93,20 @@ export default function StatsDialog({ onClose }: Props) {
     };
   }, [reloadKey]);
 
-  // 趋势窗口（范围切换只影响汇总与趋势）
+  // 趋势窗口（范围切换只影响汇总与趋势）：近 N 天 = 日历窗口零填充，
+  // 空缺日为全 0 的一条，让柱距与日历成正比；全部 = 原样（只有有数据的日子）
   const days = useMemo(() => {
     if (!stats) return [];
     if (range === "all") return stats.perDay;
-    return stats.perDay.slice(-(range === "7d" ? 7 : 30));
+    const n = range === "7d" ? 7 : 30;
+    const start = windowStart(n);
+    const byDate = new Map(
+      stats.perDay.filter((d) => d.date >= start).map((d) => [d.date, d]),
+    );
+    return Array.from({ length: n }, (_, i) => {
+      const date = addDaysStr(start, i);
+      return byDate.get(date) ?? { date, tokens: 0, sessions: 0, messages: 0 };
+    });
   }, [stats, range]);
 
   // 窗口内汇总
@@ -102,6 +133,9 @@ export default function StatsDialog({ onClose }: Props) {
     () => Math.max(...days.map((d) => d.tokens), 1),
     [days],
   );
+
+  // 零填充后窗口长度恒为 N，空窗判断看是否全 0（「全部」范围 perDay 可能为空数组）
+  const windowHasData = days.some((d) => d.tokens > 0 || d.messages > 0);
 
   const sortedProjects = useMemo(() => {
     if (!stats) return [];
@@ -165,7 +199,7 @@ export default function StatsDialog({ onClose }: Props) {
 
           {/* ---- 每日趋势 ---- */}
           <div className="stat-sec-title">每日 token 用量</div>
-          {days.length === 0 ? (
+          {days.length === 0 || !windowHasData ? (
             <div className="stats-empty">范围内无数据</div>
           ) : (
             <>
