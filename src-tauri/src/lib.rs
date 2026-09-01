@@ -1869,9 +1869,159 @@ fn file_usage_cached(path: &Path, tz_offset_minutes: i64) -> Option<FileUsage> {
     Some(u)
 }
 
+// ---------------- 用量台账（stats-ledger.json） ----------------
+// 只扫现存文件的话，会话一旦删除（回收站/清空/Claude Code 自身清理），
+// 其消耗就从统计里消失。台账按会话文件持久记录每份 jsonl 最后一次扫描
+// 的用量：每次统计刷新现存文件的贡献，文件消失则保留最后记录——统计
+// 口径因此是**历史累计消耗**。注意：台账建立之前已删除的会话无从恢复。
+
+/// 台账中的单个会话文件记录（该 jsonl 最后一次被扫描时的用量）
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct LedgerEntry {
+    mtime: u64,
+    size: u64,
+    session_id: String,
+    /// 项目 mangled 目录名（文件删除后仍能反解候选路径判断是否被排除）
+    project_dir: String,
+    project_name: String,
+    project_path: String,
+    messages: usize,
+    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    /// date -> (tokens, messages)（按记录时的本地时区归属）
+    per_day: std::collections::BTreeMap<String, (u64, usize)>,
+    /// model -> (tokens, messages)
+    per_model: std::collections::HashMap<String, (u64, usize)>,
+}
+
+/// 用量台账（数据根 stats-ledger.json）
+#[derive(Serialize, Deserialize, Default)]
+struct StatsLedger {
+    /// 记录时的时区偏移（分钟）：per_day 与时区相关，变化则现存文件全部重扫
+    tz_offset_minutes: i64,
+    /// key = 会话文件绝对路径
+    files: std::collections::HashMap<String, LedgerEntry>,
+}
+
+fn ledger_path_in(root: &Path) -> PathBuf {
+    root.join("stats-ledger.json")
+}
+
+/// 读取台账：文件缺失/损坏时返回空台账（丢失的只是已删会话历史，现存文件会重建）
+fn load_ledger_from(root: &Path) -> StatsLedger {
+    match fs::read_to_string(ledger_path_in(root)) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => StatsLedger::default(),
+    }
+}
+
+/// 写临时文件 → 原子替换（与 save_config 同套路；台账可从现存文件重建，不做 .bak）
+fn save_ledger_to(root: &Path, ledger: &StatsLedger) {
+    let path = ledger_path_in(root);
+    let Ok(json) = serde_json::to_string(ledger) else {
+        return;
+    };
+    let tmp = ledger_path_in(root).with_extension("json.tmp");
+    if fs::write(&tmp, json).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
 /// 汇总所有项目的用量统计（核心逻辑，供 command 与测试复用）。
 /// projects: (显示名, 真实路径, 项目目录) 列表；日期按 tz_offset_minutes 归属本地时区。
-fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes: i64) -> UsageStats {
+/// 台账驱动：现存且未变的文件复用上次记录，变更的重扫覆盖，消失的保留
+/// 历史——统计 = 全部台账条目之和（含已删除会话）。excluded 为排除项目
+/// 的路径清单（与其余口径一致：任一候选命中即整体不计，含其历史）。
+fn aggregate_stats_ledger(
+    projects: &[(String, String, PathBuf)],
+    excluded: &[String],
+    tz_offset_minutes: i64,
+    ledger: &mut StatsLedger,
+) -> UsageStats {
+    // 时区变化：per_day 与时区相关，现存文件需全部重扫（已删条目保留旧时区归属）
+    let tz_changed = ledger.tz_offset_minutes != tz_offset_minutes;
+    ledger.tz_offset_minutes = tz_offset_minutes;
+
+    // ---- 刷新现存文件 ----
+    for (name, path, dir) in projects {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        let project_dir = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        for e in entries.flatten() {
+            let p = e.path();
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !fname.ends_with(".jsonl") {
+                continue;
+            }
+            let session_id = &fname[..fname.len() - 6];
+            if !is_valid_uuid(session_id) {
+                continue;
+            }
+            let key = p.to_string_lossy().to_string();
+            let meta = fs::metadata(&p).ok();
+            let mtime = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            let size = meta.map(|m| m.len()).unwrap_or(0);
+            // 命中台账且未变更（且时区未变）→ 无需重扫；项目显示名/路径随扫描刷新
+            if let Some(mtime) = mtime {
+                if !tz_changed {
+                    if let Some(entry) = ledger.files.get(&key) {
+                        if entry.mtime == mtime && entry.size == size {
+                            let entry = ledger.files.get_mut(&key).unwrap();
+                            entry.project_name = name.clone();
+                            entry.project_path = path.clone();
+                            continue;
+                        }
+                    }
+                }
+            }
+            let Some(u) = file_usage_cached(&p, tz_offset_minutes) else {
+                continue;
+            };
+            if u.messages == 0 {
+                continue; // 无任何 token 数据的会话不占统计口径
+            }
+            ledger.files.insert(
+                key,
+                LedgerEntry {
+                    mtime: mtime.unwrap_or(0),
+                    size,
+                    session_id: session_id.to_string(),
+                    project_dir: project_dir.clone(),
+                    project_name: name.clone(),
+                    project_path: path.clone(),
+                    messages: u.messages,
+                    tokens: u.tokens,
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_read_tokens: u.cache_read_tokens,
+                    cache_creation_tokens: u.cache_creation_tokens,
+                    per_day: u.per_day.clone(),
+                    per_model: u.per_model.clone(),
+                },
+            );
+        }
+    }
+
+    // ---- 被排除项目的历史一并移除（与现存口径一致：排除即整体不计）----
+    ledger.files.retain(|_, e| {
+        !unmangle_candidates(&e.project_dir)
+            .iter()
+            .any(|c| excluded.iter().any(|x| x.eq_ignore_ascii_case(c)))
+    });
+
+    // ---- 聚合全部台账条目（含已删除会话）----
     let mut stats = UsageStats::default();
     // 每日会话数（date -> sessionId 集合）：会话归属其**最后活跃日**，
     // 跨天会话只计一次——任意日期窗口内每日 sessions 累加恰好等于窗口内
@@ -1883,65 +2033,47 @@ fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes:
         std::collections::BTreeMap::new();
     let mut model_map: std::collections::HashMap<String, (u64, usize)> =
         std::collections::HashMap::new();
-    for (name, path, dir) in projects {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        let mut pu = ProjectUsage {
-            name: name.clone(),
-            path: path.clone(),
-            sessions: 0,
-            messages: 0,
-            tokens: 0,
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !fname.ends_with(".jsonl") {
-                continue;
-            }
-            let session_id = &fname[..fname.len() - 6];
-            if !is_valid_uuid(session_id) {
-                continue;
-            }
-            let Some(u) = file_usage_cached(&p, tz_offset_minutes) else {
-                continue;
-            };
-            if u.messages == 0 {
-                continue; // 无任何 token 数据的会话不占统计口径
-            }
-            pu.sessions += 1;
-            stats.sessions += 1;
-            pu.messages += u.messages;
-            stats.messages += u.messages;
-            pu.tokens += u.tokens;
-            stats.tokens += u.tokens;
-            stats.input_tokens += u.input_tokens;
-            stats.output_tokens += u.output_tokens;
-            stats.cache_read_tokens += u.cache_read_tokens;
-            stats.cache_creation_tokens += u.cache_creation_tokens;
-            for (d, (t, m)) in &u.per_day {
-                let dm = day_map.entry(d.clone()).or_default();
-                dm.0 += t;
-                dm.1 += m;
-            }
-            // token/消息按天累加，但会话数只记到 per_day 的最后一天
-            // （BTreeMap 末 key = 最后活跃日）
-            if let Some(last_day) = u.per_day.keys().next_back() {
-                day_sessions
-                    .entry(last_day.clone())
-                    .or_default()
-                    .insert(session_id.to_string());
-            }
-            for (mo, (t, m)) in &u.per_model {
-                let mm = model_map.entry(mo.clone()).or_default();
-                mm.0 += t;
-                mm.1 += m;
-            }
+    // 项目聚合按真实路径去重（同一项目目录的已删/现存条目归并到一行）
+    let mut project_map: std::collections::HashMap<String, ProjectUsage> =
+        std::collections::HashMap::new();
+    for e in ledger.files.values() {
+        stats.sessions += 1;
+        stats.messages += e.messages;
+        stats.tokens += e.tokens;
+        stats.input_tokens += e.input_tokens;
+        stats.output_tokens += e.output_tokens;
+        stats.cache_read_tokens += e.cache_read_tokens;
+        stats.cache_creation_tokens += e.cache_creation_tokens;
+        for (d, (t, m)) in &e.per_day {
+            let dm = day_map.entry(d.clone()).or_default();
+            dm.0 += t;
+            dm.1 += m;
         }
-        if pu.sessions > 0 {
-            stats.per_project.push(pu);
+        // token/消息按天累加，但会话数只记到 per_day 的最后一天
+        // （BTreeMap 末 key = 最后活跃日）
+        if let Some(last_day) = e.per_day.keys().next_back() {
+            day_sessions
+                .entry(last_day.clone())
+                .or_default()
+                .insert(e.session_id.clone());
         }
+        for (mo, (t, m)) in &e.per_model {
+            let mm = model_map.entry(mo.clone()).or_default();
+            mm.0 += t;
+            mm.1 += m;
+        }
+        let pu = project_map
+            .entry(e.project_path.clone())
+            .or_insert_with(|| ProjectUsage {
+                name: e.project_name.clone(),
+                path: e.project_path.clone(),
+                sessions: 0,
+                messages: 0,
+                tokens: 0,
+            });
+        pu.sessions += 1;
+        pu.messages += e.messages;
+        pu.tokens += e.tokens;
     }
     stats.earliest = day_map.keys().next().cloned();
     stats.latest = day_map.keys().next_back().cloned();
@@ -1963,12 +2095,21 @@ fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes:
         })
         .collect();
     stats.per_model.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    stats.per_project = project_map.into_values().collect();
     stats.per_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
     stats
 }
 
+/// 一次性聚合（无台账持久化，仅供旧测试语义）
+#[cfg(test)]
+fn aggregate_stats_in(projects: &[(String, String, PathBuf)], tz_offset_minutes: i64) -> UsageStats {
+    let mut ledger = StatsLedger::default();
+    aggregate_stats_ledger(projects, &[], tz_offset_minutes, &mut ledger)
+}
+
 /// 全局使用统计（仪表盘）。在 Tauri 线程池执行，不阻塞 UI。
-/// 口径：excluded（用户已移除）的项目不统计；已删除（missing）的项目仍统计。
+/// 口径：excluded（用户已移除）的项目不统计；已删除（missing）的项目仍统计；
+/// 会话文件删除后其历史用量保留在台账中（统计 = 历史累计消耗）。
 /// tz_offset_minutes：本地时区偏移（东八区 = 480），单日统计按本地日期归属。
 #[tauri::command]
 async fn get_usage_stats(tz_offset_minutes: Option<i64>) -> Result<UsageStats, String> {
@@ -2009,7 +2150,11 @@ async fn get_usage_stats(tz_offset_minutes: Option<i64>) -> Result<UsageStats, S
         };
         projects.push((name, path, d));
     }
-    Ok(aggregate_stats_in(&projects, tz_offset_minutes.unwrap_or(0)))
+    let root = resolve_root_dir();
+    let mut ledger = load_ledger_from(&root);
+    let stats = aggregate_stats_ledger(&projects, &excluded, tz_offset_minutes.unwrap_or(0), &mut ledger);
+    save_ledger_to(&root, &ledger);
+    Ok(stats)
 }
 
 /// 向会话 jsonl 追加 custom-title 行（核心逻辑，供 command 与测试复用）
@@ -3748,6 +3893,130 @@ mod tests {
         assert_eq!(s.per_day[1].tokens, 51);
         // 全时段每日累加 == 去重会话数（与「全部」口径一致）
         assert_eq!(s.per_day.iter().map(|d| d.sessions).sum::<usize>(), s.sessions);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 台账核心：会话文件删除后历史用量保留，统计 = 历史累计消耗
+    #[test]
+    fn stats_ledger_keeps_deleted_session_history() {
+        let root = temp_root("ledger-del");
+        let pa = root.join("projects").join("D--work-alpha");
+        fs::create_dir_all(&pa).unwrap();
+        let line = |ts: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"x"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":{tokens},"output_tokens":1}}}},"timestamp":"{ts}"}}"#,
+            )
+        };
+        let fa = pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl");
+        let fb = pa.join("bbbbbbbb-2222-4222-8222-222222222222.jsonl");
+        fs::write(&fa, line("2026-08-12T01:00:00.000Z", 100)).unwrap();
+        fs::write(&fb, line("2026-08-13T01:00:00.000Z", 200)).unwrap();
+
+        let projects = vec![("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone())];
+        let mut ledger = StatsLedger::default();
+        let s1 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
+        assert_eq!(s1.sessions, 2);
+        assert_eq!(s1.tokens, 101 + 201);
+
+        // 删除会话 B 后再统计：历史保留，总量不变
+        fs::remove_file(&fb).unwrap();
+        let s2 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
+        assert_eq!(s2.sessions, 2);
+        assert_eq!(s2.tokens, 101 + 201);
+        assert_eq!(s2.per_project[0].sessions, 2); // 项目行也保留已删会话
+        assert_eq!(s2.latest.as_deref(), Some("2026-08-13")); // 已删会话的活跃日仍在趋势里
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 台账对变更文件重扫覆盖（resume 追加新消息后总量随之增长）
+    #[test]
+    fn stats_ledger_updates_changed_session() {
+        let root = temp_root("ledger-chg");
+        let pa = root.join("projects").join("D--work-alpha");
+        fs::create_dir_all(&pa).unwrap();
+        let line = |ts: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"x"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":{tokens},"output_tokens":1}}}},"timestamp":"{ts}"}}"#,
+            )
+        };
+        let fa = pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl");
+        fs::write(&fa, line("2026-08-12T01:00:00.000Z", 100)).unwrap();
+        let projects = vec![("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone())];
+        let mut ledger = StatsLedger::default();
+        let s1 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
+        assert_eq!((s1.sessions, s1.messages, s1.tokens), (1, 1, 101));
+
+        // 追加一条（mtime/size 变化 → 重扫覆盖，不是叠加）
+        let mut content = fs::read_to_string(&fa).unwrap();
+        content.push('\n');
+        content.push_str(&line("2026-08-12T02:00:00.000Z", 50));
+        fs::write(&fa, content).unwrap();
+        let s2 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
+        assert_eq!((s2.sessions, s2.messages, s2.tokens), (1, 2, 152));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 排除项目时其台账历史一并移除（与现存口径一致：排除即整体不计）
+    #[test]
+    fn stats_ledger_drops_excluded_project_history() {
+        let root = temp_root("ledger-excl");
+        let pa = root.join("projects").join("D--work-alpha");
+        fs::create_dir_all(&pa).unwrap();
+        let line = |ts: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"x"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":{tokens},"output_tokens":1}}}},"timestamp":"{ts}"}}"#,
+            )
+        };
+        fs::write(
+            pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl"),
+            line("2026-08-12T01:00:00.000Z", 100),
+        )
+        .unwrap();
+        let projects = vec![("alpha".to_string(), "D:\\work\\alpha".to_string(), pa.clone())];
+        let mut ledger = StatsLedger::default();
+        let s1 = aggregate_stats_ledger(&projects, &[], 0, &mut ledger);
+        assert_eq!(s1.sessions, 1);
+
+        // 项目被排除（含文件已删除的历史条目）
+        fs::remove_file(pa.join("aaaaaaaa-1111-4111-8111-111111111111.jsonl")).unwrap();
+        let excluded = vec!["D:\\work\\alpha".to_string()];
+        let s2 = aggregate_stats_ledger(&projects, &excluded, 0, &mut ledger);
+        assert_eq!(s2.sessions, 0);
+        assert!(s2.per_project.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 台账落盘/回读往返
+    #[test]
+    fn stats_ledger_roundtrip_persistence() {
+        let root = temp_root("ledger-io");
+        let mut ledger = StatsLedger {
+            tz_offset_minutes: 480,
+            ..Default::default()
+        };
+        ledger.files.insert(
+            "D:\\x\\a.jsonl".to_string(),
+            LedgerEntry {
+                mtime: 42,
+                size: 7,
+                session_id: "aaaaaaaa-1111-4111-8111-111111111111".to_string(),
+                project_dir: "D--x".to_string(),
+                project_name: "x".to_string(),
+                project_path: "D:\\x".to_string(),
+                messages: 3,
+                tokens: 99,
+                ..Default::default()
+            },
+        );
+        save_ledger_to(&root, &ledger);
+        let back = load_ledger_from(&root);
+        assert_eq!(back.tz_offset_minutes, 480);
+        assert_eq!(back.files.len(), 1);
+        let e = back.files.get("D:\\x\\a.jsonl").unwrap();
+        assert_eq!((e.mtime, e.size, e.tokens, e.messages), (42, 7, 99, 3));
+        // 损坏的台账 → 空台账（不 panic）
+        fs::write(ledger_path_in(&root), "{not-json").unwrap();
+        assert_eq!(load_ledger_from(&root).files.len(), 0);
         fs::remove_dir_all(&root).unwrap();
     }
 

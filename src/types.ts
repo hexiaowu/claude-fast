@@ -157,8 +157,9 @@ export interface ProjectUsage {
   tokens: number;
 }
 
-/** 全局使用统计（仪表盘；excluded 项目不计，已删除项目仍计。订阅版 jsonl 无
- *  costUSD，故只统计 token） */
+/** 全局使用统计（仪表盘；口径 = **历史累计消耗**：后端用量台账持久记录每个会话
+ *  文件的贡献，已删除会话仍计入；excluded 项目不计（含其历史）；订阅版 jsonl
+ *  无 costUSD，故只统计 token） */
 export interface UsageStats {
   sessions: number;
   messages: number;

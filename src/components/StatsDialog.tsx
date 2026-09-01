@@ -125,7 +125,7 @@ export default function StatsDialog({ onClose }: Props) {
             </button>
           ))}
         </div>
-        <span className="stats-range-note">汇总与趋势按范围；排行与模型为全部时间</span>
+        <span className="stats-range-note">汇总与趋势按范围；排行与模型为全部时间；已删会话仍计入</span>
         <button
           className="btn"
           style={{ marginLeft: "auto" }}

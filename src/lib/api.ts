@@ -64,7 +64,8 @@ export const api = {
   /** 导出会话到指定路径（markdown / jsonl），返回写入的字节数 */
   exportSession: (file: string, destPath: string, format: "markdown" | "jsonl") =>
     invoke<number>("export_session", { file, destPath, format }),
-  /** 全局使用统计（仪表盘；后端带文件级 mtime 缓存）。单日统计按本地时区归属：
+  /** 全局使用统计（仪表盘；后端按用量台账持久累计，已删除会话的历史用量仍计入；
+   *  现存文件仅 mtime+size 变更时重扫）。单日统计按本地时区归属：
    *  getTimezoneOffset 返回 UTC-本地（东八区为 -480），取负得东偏分钟数 */
   getUsageStats: () =>
     invoke<UsageStats>("get_usage_stats", {
