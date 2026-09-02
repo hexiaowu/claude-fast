@@ -179,11 +179,6 @@ code {
   background: var(--panel-2);
 }
 
-/* ⚙ 齿轮字符在 Windows 字体下 glyph 视觉重心偏上，微调下移补偿 */
-.icon-gear {
-  transform: translateY(1px);
-}
-
 /* ============ 工具栏 ============ */
 .toolbar {
   display: flex;

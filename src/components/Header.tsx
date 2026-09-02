@@ -1,4 +1,5 @@
 import claudeLogo from "../assets/claude-logo.png";
+import { MoonIcon, SettingsIcon, SunIcon } from "./Icons";
 
 interface Props {
   dark: boolean;
@@ -40,11 +41,11 @@ export default function Header({
               : "claude 未找到"}
           {missingCount > 0 && <span className="badge">{missingCount} 失效</span>}
         </button>
-        <button className="icon-btn icon-gear" title="设置" onClick={onSettings}>
-          ⚙
+        <button className="icon-btn" title="设置" onClick={onSettings}>
+          <SettingsIcon size={15} />
         </button>
         <button className="icon-btn" title={dark ? "切换到浅色" : "切换到深色"} onClick={onToggleTheme}>
-          {dark ? "☀" : "🌙"}
+          {dark ? <SunIcon size={15} /> : <MoonIcon size={15} />}
         </button>
       </div>
     </header>
