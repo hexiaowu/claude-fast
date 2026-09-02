@@ -32,7 +32,6 @@ export default function App() {
   const [items, setItems] = useState<Project[]>([]);
   const [projectDirs, setProjectDirs] = useState<string[]>([]);
   const [excludedDirs, setExcludedDirs] = useState<string[]>([]);
-  const [favorites, setFavorites] = useState<string[]>([]);
   const [dark, setDark] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -100,7 +99,7 @@ export default function App() {
       setCloseChoiceOpen(false);
       if (remember) {
         setCloseAction(action);
-        await api.saveConfig(favorites, projectDirs, excludedDirs, dark, action).catch(() => {});
+        await api.saveConfig(projectDirs, excludedDirs, dark, action).catch(() => {});
       }
       if (action === "minimize") {
         await getCurrentWindow().hide();
@@ -108,7 +107,7 @@ export default function App() {
         await api.quitApp();
       }
     },
-    [favorites, projectDirs, excludedDirs, dark],
+    [projectDirs, excludedDirs, dark],
   );
 
   // ---------- 数据加载 ----------
@@ -117,7 +116,6 @@ export default function App() {
     try {
       const [list, cfg] = await Promise.all([api.listProjects(), api.loadConfig()]);
       setItems(list);
-      setFavorites(cfg.favorites ?? []);
       setProjectDirs(cfg.projects ?? []);
       setExcludedDirs(cfg.excluded ?? []);
       setDark(cfg.dark ?? false);
@@ -148,7 +146,7 @@ export default function App() {
       .then((info) => {
         if (info.installMode && !localStorage.getItem("cf-data-tip")) {
           localStorage.setItem("cf-data-tip", "1");
-          setToast(`数据目录：${info.path}（项目清单与收藏保存在此）`);
+          setToast(`数据目录：${info.path}（项目清单保存在此）`);
           window.setTimeout(() => setToast(null), 5000);
         }
       })
@@ -166,13 +164,12 @@ export default function App() {
     window.setTimeout(() => setToast(null), 2500);
   }, []);
 
-  // ---------- 收藏 / 主题 ----------
+  // ---------- 主题 ----------
 
   const persistConfig = useCallback(
-    async (favs: string[], d: boolean, ca?: CloseAction) => {
+    async (d: boolean, ca?: CloseAction) => {
       try {
         await api.saveConfig(
-          favs,
           projectDirs,
           excludedDirs,
           d,
@@ -185,59 +182,30 @@ export default function App() {
     [showToast, closeAction, projectDirs, excludedDirs],
   );
 
-  const toggleFav = useCallback(
-    async (key: string) => {
-      const next = favorites.includes(key)
-        ? favorites.filter((f) => f !== key)
-        : [...favorites, key];
-      setFavorites(next);
-      await persistConfig(next, dark);
-    },
-    [favorites, dark, persistConfig],
-  );
-
-  /** 收藏拖拽排序：按 key 重排（非索引），对过滤/失效 key 天然安全 */
-  const reorderFavorites = useCallback(
-    async (draggedKey: string, targetKey: string, before: boolean) => {
-      if (draggedKey === targetKey) return;
-      if (!favorites.includes(draggedKey) || !favorites.includes(targetKey))
-        return;
-      const next = favorites.filter((k) => k !== draggedKey);
-      const to = next.indexOf(targetKey);
-      next.splice(before ? to : to + 1, 0, draggedKey);
-      if (next.every((k, i) => k === favorites[i])) return; // 位置未变，免写盘
-      setFavorites(next);
-      await persistConfig(next, dark);
-    },
-    [favorites, dark, persistConfig],
-  );
-
   const toggleTheme = useCallback(async () => {
     const next = !dark;
     setDark(next);
-    await persistConfig(favorites, next);
-  }, [dark, favorites, persistConfig]);
+    await persistConfig(next);
+  }, [dark, persistConfig]);
 
   // ---------- 列表派生数据 ----------
 
   const sorted = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const filtered = items.filter(
-      (l) =>
-        !q ||
-        l.name.toLowerCase().includes(q) ||
-        l.path.toLowerCase().includes(q),
-    );
-    // 收藏组按 favorites 数组顺序渲染（拖拽排序的真源；合并列表原始顺序与此无关）
-    const byKey = new Map(filtered.map((l) => [l.key, l]));
-    const fav = favorites
-      .map((k) => byKey.get(k))
-      .filter((l): l is Project => !!l);
-    const rest = filtered
-      .filter((l) => !favorites.includes(l.key))
-      .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
-    return [...fav, ...rest];
-  }, [items, favorites, search]);
+    // 最近使用倒序（lastActive = 项目最近一次会话的 mtime）；无记录按名称垫底
+    return items
+      .filter(
+        (l) =>
+          !q ||
+          l.name.toLowerCase().includes(q) ||
+          l.path.toLowerCase().includes(q),
+      )
+      .sort(
+        (a, b) =>
+          (b.lastActive ?? -1) - (a.lastActive ?? -1) ||
+          a.name.localeCompare(b.name, "zh-Hans-CN"),
+      );
+  }, [items, search]);
 
   const missing = items.filter((l) => l.healthy === false);
 
@@ -293,15 +261,10 @@ export default function App() {
         showToast("移除失败：" + String(e));
         return;
       }
-      const favs = favorites.filter((f) => f !== l.key);
-      if (favs.length !== favorites.length) {
-        setFavorites(favs);
-        await persistConfig(favs, dark);
-      }
       await load();
       showToast(`已从列表移除 ${l.name}`);
     },
-    [favorites, dark, persistConfig, load, showToast],
+    [load, showToast],
   );
 
   const confirmRemove = useCallback(
@@ -460,16 +423,12 @@ export default function App() {
         <div className="main-left">
           <ProjectList
             items={sorted}
-            favorites={favorites}
             selectedKey={selectedKey}
             expandedKey={expandedKey}
             activeSessionFile={activeSession?.session.file ?? null}
             sessionsByKey={sessionsByKey}
             onSelect={setSelectedKey}
             onLaunch={launch}
-            onToggleFav={toggleFav}
-            dragEnabled={search.trim() === ""}
-            onReorderFavorite={reorderFavorites}
             onToggleExpand={toggleExpand}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}
@@ -492,7 +451,6 @@ export default function App() {
 
       <StatusBar
         total={items.length}
-        favCount={favorites.length}
         missingCount={missing.length}
         claudeOk={claudeOk}
       />
@@ -502,9 +460,7 @@ export default function App() {
           x={menu.x}
           y={menu.y}
           project={items.find((l) => l.key === menu.key) ?? null}
-          favorites={favorites}
           onClose={() => setMenu(null)}
-          onToggleFav={toggleFav}
           onOpenFolder={openFolder}
           onCopyPath={copyPath}
           onRemove={confirmRemove}
@@ -568,7 +524,7 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           onSave={async (action) => {
             setCloseAction(action);
-            await persistConfig(favorites, dark, action);
+            await persistConfig(dark, action);
             setSettingsOpen(false);
             showToast("设置已保存");
           }}

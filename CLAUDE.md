@@ -4,7 +4,7 @@
 
 > **版本线**：仓库已重新规划，当前全部代码为 **v1.0.0**（`package.json` / `Cargo.toml` / `tauri.conf.json` 三处版本号一致）。历史上的 PowerShell/WinForms 版与 v2.x/v3.x 旧版号均已作废，代码中不要再按旧版本号理解。另有 **Node.js（Electron）后端重构分支** `claude-fast-electron`（见下「分支结构」）。
 >
-> **去脚本化（重要）**：项目清单为**路径模型**——`config.json` 的 `favorites`/`projects` 存的都是**项目绝对路径**（不再是脚本名），`+` 号启动直接 `cmd /k cd /d "项目" && claude`，**不再生成/执行 scripts/ 启动脚本**。旧版脚本在首次启动时被自动解析迁移（`ensure_projects_migrated`，幂等）。项目列表 = Claude 会话目录扫描（unmangle 反解）∪ config.projects 手动清单。
+> **去脚本化（重要）**：项目清单为**路径模型**——`config.json` 的 `projects` 存的是**项目绝对路径**（不再是脚本名），`+` 号启动直接 `cmd /k cd /d "项目" && claude`，**不再生成/执行 scripts/ 启动脚本**。旧版脚本在首次启动时被自动解析迁移（`ensure_projects_migrated`，幂等）。项目列表 = Claude 会话目录扫描（unmangle 反解）∪ config.projects 手动清单。
 
 ## 分支结构（双后端）
 
@@ -28,7 +28,7 @@
 ## 启动与项目清单（去脚本化）
 
 - **不再生成/执行启动脚本**：`+` 号启动直接新开终端执行 `cmd /k cd /d "项目路径" && claude`（Windows ShellExecuteW；macOS 临时 sh + Terminal.app），claude 退出后窗口保留。
-- 项目列表 = **Claude 会话目录扫描**（`~/.claude/projects` unmangle 反解）∪ `config.projects`（手动添加的项目路径），按路径去重；收藏（favorites）存项目绝对路径。
+- 项目列表 = **Claude 会话目录扫描**（`~/.claude/projects` unmangle 反解）∪ `config.projects`（手动添加的项目路径），按路径去重；列表按**最近使用**排序（`list_projects` 为每项计算 `last_active` = 会话目录下全部 jsonl 的最大 mtime，无记录垫底，前端按 `lastActive` 倒序、名称序兜底）。
 - 「移除」= 从清单移除项目（不删磁盘文件）；「批量添加」= 把扫描到的项目加入清单。
 - 旧版启动脚本（`scripts/claude-*.bat|sh`）在首次启动时被 `ensure_projects_migrated` 自动解析迁移（key → 路径），脚本文件保留在磁盘不自动删除。
 - 健康检查（`check_projects`）直接检查项目路径是否存在。
@@ -48,7 +48,7 @@
 
 ## 功能
 
-- **收藏置顶**（`favorites`）：点星标或右键收藏，金色置顶。已收藏项可**整行拖拽排序**（顺序即 `favorites` 数组顺序，松手后复用 `save_config` 落盘；按 key 重排非索引，失效 key 原位保留；搜索过滤期间禁用拖拽；未收藏行不可拖拽）。前端用原生 HTML5 DnD——**`tauri.conf.json` 的 `dragDropEnabled: false` 是前提**（默认 true 时 Windows 上 WebView2 的 OLE 拖放处理会拦截页面内 dragover/drop，勿当冗余配置删掉）。
+- **列表按最近使用排序**：`list_projects_impl` 用 `latest_session_mtime` 取项目会话目录（`mangle(路径)`）下全部 `.jsonl` 的最大 mtime 作为 `last_active`，前端倒序渲染（无记录按名称垫底）。收藏置顶与收藏行拖拽排序功能**已移除**（与分组组织心智冲突，最近使用排序替代），`tauri.conf.json` 的 `dragDropEnabled` 已恢复默认。
 - **健康检查不阻塞启动**：`list_launchers` 只解析脚本内容不做目录 stat（秒返回）；前端渲染后异步调 `check_launchers` 并行检查，失效目录自动标红；「健康检查」对话框打开时现场重新检查。
 - **批量添加**：扫描 Claude Code 项目目录，`unmangle_candidates` 反解出真实路径并验证存在性，失效项目（`missing`）不参与添加；已在清单中的项目标记跳过。清单存**项目绝对路径**于 `config.projects`。
 - **会话管理**：点击项目行展开其 Claude Code 会话列表（异步加载不阻塞 UI）；会话行显示标题 + 相对时间 + 摘要，悬停出现 ✎ 重命名、🗑 删除。`list_sessions(project_path)` 用真实路径正向 mangle 定位 `<projects>/<mangled>/`，对每个 `.jsonl` 只读首尾各 64KB（`LITE_READ_BUF_SIZE`）提取元数据：标题回退链 customTitle > aiTitle > 首条用户消息；**命令消息（如 `/init`）被跳过——只执行命令、无实质对话的会话不进列表**；sidechain/纯元数据会话过滤；按 mtime 倒序。`rename_session(file, new_title)` 安全校验（限 projects 目录下 uuid.jsonl）后向 jsonl **追加** `custom-title` 行（与 Claude Code `/rename` 同机制，不覆盖原文件）。
@@ -68,7 +68,7 @@
 
 ## 铁律
 
-- **绝不删除数据根的 `config.json` / `.bak`**——用户收藏在这里。`save_config` 三步保护：写临时文件 → 旧文件备份为 `.bak` → 原子替换；`load_config` 读主文件失败时自动从 `.bak` 回退。
+- **绝不删除数据根的 `config.json` / `.bak`**——用户项目清单与设置在这里。`save_config` 三步保护：写临时文件 → 旧文件备份为 `.bak` → 原子替换；`load_config` 读主文件失败时自动从 `.bak` 回退。
 - ⚠️ **必须用 `npm run tauri build`（或 `npx tauri build`）构建，禁止直接 `cargo build --release`**：只有 tauri CLI 自动加 `--features tauri/custom-protocol`，缺它产物是 dev 模式，运行时连 `http://localhost:1420` 白屏。
 - 国内网络首次构建需 crates.io 镜像（用户 `~/.cargo/config.toml` 已配 rsproxy.cn）。
 - **新增任何按钮类必须做墨迹居中补偿，并放大目检/实测**（历史规律：每加新按钮都漏这条被用户发现）。中文字体 YaHei 的字形墨迹与行盒中心不重合，偏移方向由 line-height 决定：

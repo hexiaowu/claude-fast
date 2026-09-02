@@ -21,14 +21,12 @@ export const api = {
   listProjects: () => invoke<Project[]>("list_projects"),
   loadConfig: () => invoke<Config>("load_config"),
   saveConfig: (
-    favorites: string[],
     projects: string[],
     excluded: string[],
     dark: boolean,
     closeAction?: string | null,
   ) =>
     invoke("save_config", {
-      favorites,
       projects,
       excluded,
       dark,
