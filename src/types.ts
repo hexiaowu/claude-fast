@@ -7,13 +7,13 @@ export interface Project {
   path: string;
   /** undefined = 尚未检查（列表先渲染，后台异步检查后回填）；false = 路径已不存在 */
   healthy?: boolean;
-  /** 最近一次会话的 mtime（epoch ms）；null = 无会话记录（排序垫底） */
-  lastActive?: number | null;
 }
 
 export type CloseAction = "quit" | "minimize" | null;
 
 export interface Config {
+  /** 用户手动排序的项目绝对路径（全局拖拽排序真源；未收录项按名称追加在后） */
+  order: string[];
   /** 手动添加的项目路径清单 */
   projects: string[];
   /** 被用户从列表移除的项目路径（会话扫描会重新发现它们，需排除） */

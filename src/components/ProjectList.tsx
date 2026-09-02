@@ -1,3 +1,5 @@
+import { useCallback, useState } from "react";
+import type { DragEvent } from "react";
 import type { Project, SessionInfo } from "../types";
 import { PencilIcon, PlayIcon, TrashIcon } from "./Icons";
 
@@ -12,6 +14,10 @@ interface Props {
   sessionsByKey: Record<string, SessionInfo[] | null | undefined>;
   onSelect: (key: string) => void;
   onLaunch: (key: string) => void;
+  /** 全局拖拽排序：把 draggedKey 移动到 targetKey 之前/之后 */
+  onReorder: (draggedKey: string, targetKey: string, before: boolean) => void;
+  /** 是否启用拖拽排序（搜索过滤期间禁用） */
+  dragEnabled: boolean;
   onToggleExpand: (key: string) => void;
   onRenameSession: (key: string, session: SessionInfo) => void;
   onDeleteSession: (key: string, session: SessionInfo) => void;
@@ -40,6 +46,8 @@ export default function ProjectList({
   sessionsByKey,
   onSelect,
   onLaunch,
+  onReorder,
+  dragEnabled,
   onToggleExpand,
   onRenameSession,
   onDeleteSession,
@@ -47,6 +55,55 @@ export default function ProjectList({
   onResumeSession,
   onContextMenu,
 }: Props) {
+  // ---------- 全局拖拽排序（仅临时视觉状态，顺序真源在 App 的 order 数组）----------
+
+  /** 正在拖拽的项目 key */
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  /** 悬停目标行 key */
+  const [overKey, setOverKey] = useState<string | null>(null);
+  /** 悬停在上半/下半（决定插入到目标之前/之后） */
+  const [overPos, setOverPos] = useState<"above" | "below">("above");
+
+  /** dragend 兜底清理：Esc 取消 / 窗外释放都会触发 */
+  const clearDragState = useCallback(() => {
+    setDragKey(null);
+    setOverKey(null);
+  }, []);
+
+  const handleDragStart = (e: DragEvent<HTMLDivElement>, key: string) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", key); // WebKit：无 data 拖拽不会启动
+    setDragKey(key);
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>, key: string) => {
+    if (!dragKey) return;
+    e.preventDefault(); // 允许放置（任意行都是合法目标）
+    e.dataTransfer.dropEffect = "move";
+    const r = e.currentTarget.getBoundingClientRect();
+    const pos = e.clientY < r.top + r.height / 2 ? "above" : "below";
+    setOverKey((k) => (k === key ? k : key)); // 值不变 → React 跳过重渲染（dragover 高频触发）
+    setOverPos((p) => (p === pos ? p : pos));
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>, key: string) => {
+    if (overKey !== key) return;
+    const rt = e.relatedTarget as Node | null;
+    if (rt && e.currentTarget.contains(rt)) return; // 仍在行内（子元素间移动）
+    setOverKey(null);
+  };
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>, key: string) => {
+    if (!dragKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    const before = e.clientY < r.top + r.height / 2; // 从事件重算，不依赖 state
+    const dragged = dragKey;
+    clearDragState();
+    onReorder(dragged, key, before);
+  };
+
   if (items.length === 0) {
     return (
       <div className="empty">
@@ -60,6 +117,7 @@ export default function ProjectList({
   return (
     <div className="list">
       {items.map((l) => {
+        const showDrop = overKey === l.key && l.key !== dragKey;
         const isSelected = l.key === selectedKey;
         const isExpanded = l.key === expandedKey;
         const sessions = sessionsByKey[l.key];
@@ -68,7 +126,15 @@ export default function ProjectList({
             <div
               className={`row ${isSelected ? "selected" : ""} ${
                 l.healthy === false ? "broken" : ""
+              } ${dragEnabled ? "row-draggable" : ""} ${l.key === dragKey ? "dragging" : ""} ${
+                showDrop ? (overPos === "above" ? "drop-above" : "drop-below") : ""
               }`}
+              draggable={dragEnabled}
+              onDragStart={(e) => handleDragStart(e, l.key)}
+              onDragEnd={clearDragState}
+              onDragOver={(e) => handleDragOver(e, l.key)}
+              onDragLeave={(e) => handleDragLeave(e, l.key)}
+              onDrop={(e) => handleDrop(e, l.key)}
               onClick={() => {
                 onSelect(l.key);
                 onToggleExpand(l.key);

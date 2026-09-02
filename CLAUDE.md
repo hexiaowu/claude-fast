@@ -28,7 +28,7 @@
 ## 启动与项目清单（去脚本化）
 
 - **不再生成/执行启动脚本**：`+` 号启动直接新开终端执行 `cmd /k cd /d "项目路径" && claude`（Windows ShellExecuteW；macOS 临时 sh + Terminal.app），claude 退出后窗口保留。
-- 项目列表 = **Claude 会话目录扫描**（`~/.claude/projects` unmangle 反解）∪ `config.projects`（手动添加的项目路径），按路径去重；列表按**最近使用**排序（`list_projects` 为每项计算 `last_active` = 会话目录下全部 jsonl 的最大 mtime，无记录垫底，前端按 `lastActive` 倒序、名称序兜底）。
+- 项目列表 = **Claude 会话目录扫描**（`~/.claude/projects` unmangle 反解）∪ `config.projects`（手动添加的项目路径），按路径去重；列表顺序 = `config.order` 数组（全局拖拽排序真源，存项目绝对路径；未收录的新发现项目按名称追加在后；`remove_project` 同步从 order 移除）。
 - 「移除」= 从清单移除项目（不删磁盘文件）；「批量添加」= 把扫描到的项目加入清单。
 - 旧版启动脚本（`scripts/claude-*.bat|sh`）在首次启动时被 `ensure_projects_migrated` 自动解析迁移（key → 路径），脚本文件保留在磁盘不自动删除。
 - 健康检查（`check_projects`）直接检查项目路径是否存在。
@@ -48,7 +48,7 @@
 
 ## 功能
 
-- **列表按最近使用排序**：`list_projects_impl` 用 `latest_session_mtime` 取项目会话目录（`mangle(路径)`）下全部 `.jsonl` 的最大 mtime 作为 `last_active`，前端倒序渲染（无记录按名称垫底）。收藏置顶与收藏行拖拽排序功能**已移除**（与分组组织心智冲突，最近使用排序替代），`tauri.conf.json` 的 `dragDropEnabled` 已恢复默认。
+- **全局拖拽排序**（`order`）：任意项目行可整行拖拽换位，顺序即 `config.order` 数组顺序（整表重排后落盘；搜索过滤期间禁用拖拽；未收录/新发现项目按名称追加在末尾）。前端用原生 HTML5 DnD——**`tauri.conf.json` 的 `dragDropEnabled: false` 是前提**（默认 true 时 Windows 上 WebView2 的 OLE 拖放处理会拦截页面内 dragover/drop，勿当冗余配置删掉）。收藏置顶功能已移除（与全局手动排序重复）；旧版 `favorites` 键经 serde alias 无缝承接为 `order` 初始排序。
 - **健康检查不阻塞启动**：`list_launchers` 只解析脚本内容不做目录 stat（秒返回）；前端渲染后异步调 `check_launchers` 并行检查，失效目录自动标红；「健康检查」对话框打开时现场重新检查。
 - **批量添加**：扫描 Claude Code 项目目录，`unmangle_candidates` 反解出真实路径并验证存在性，失效项目（`missing`）不参与添加；已在清单中的项目标记跳过。清单存**项目绝对路径**于 `config.projects`。
 - **会话管理**：点击项目行展开其 Claude Code 会话列表（异步加载不阻塞 UI）；会话行显示标题 + 相对时间 + 摘要，悬停出现 ✎ 重命名、🗑 删除。`list_sessions(project_path)` 用真实路径正向 mangle 定位 `<projects>/<mangled>/`，对每个 `.jsonl` 只读首尾各 64KB（`LITE_READ_BUF_SIZE`）提取元数据：标题回退链 customTitle > aiTitle > 首条用户消息；**命令消息（如 `/init`）被跳过——只执行命令、无实质对话的会话不进列表**；sidechain/纯元数据会话过滤；按 mtime 倒序。`rename_session(file, new_title)` 安全校验（限 projects 目录下 uuid.jsonl）后向 jsonl **追加** `custom-title` 行（与 Claude Code `/rename` 同机制，不覆盖原文件）。

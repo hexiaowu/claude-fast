@@ -43,8 +43,6 @@ pub struct ProjectItem {
     path: String,
     /// true = 路径当前不存在（标红、不可启动）
     missing: bool,
-    /// 最近一次会话的 mtime（epoch ms）；None = 无会话记录（前端排序垫底）
-    last_active: Option<i64>,
     // healthy 不在 list_projects 中计算（避免启动时阻塞在目录检查上），
     // 由前端调用 check_projects 异步获取后回填。
 }
@@ -52,6 +50,10 @@ pub struct ProjectItem {
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// 用户手动排序的项目绝对路径（全局拖拽排序的真源；未收录项按名称追加在后。
+    /// 旧版 favorites 键经 serde alias 无缝承接为初始排序，写回后键名变为 order）
+    #[serde(default, alias = "favorites")]
+    order: Vec<String>,
     /// 手动添加的项目路径清单（Claude 会话扫描之外的补充）
     #[serde(default)]
     projects: Vec<String>,
@@ -290,37 +292,6 @@ fn stat_is_dir(p: &str) -> bool {
     Path::new(p).is_dir()
 }
 
-/// 项目会话目录下全部 .jsonl 的最大 mtime（epoch ms）；无会话文件返回 None
-fn latest_session_mtime(dir: &Path) -> Option<i64> {
-    let mut best: Option<i64> = None;
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if !p.is_file() {
-            continue;
-        }
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".jsonl") {
-            continue;
-        }
-        let Some(ms) = e
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-        else {
-            continue;
-        };
-        if best.map_or(true, |b| ms > b) {
-            best = Some(ms);
-        }
-    }
-    best
-}
-
 /// 构建主列表：Claude 会话扫描 ∪ config.projects 手动清单，按路径去重，
 /// 并剔除排除清单（用户已移除）中的项目。
 /// missing = 路径当前不存在（仍显示、标红、不可启动）。
@@ -350,7 +321,6 @@ fn list_projects_impl(
                 name: s.name.clone(),
                 path: s.path,
                 missing: s.missing,
-                last_active: None,
             },
             &mut out,
             &mut seen,
@@ -370,17 +340,10 @@ fn list_projects_impl(
                 name,
                 path: mp.clone(),
                 missing: !stat_is_dir(mp),
-                last_active: None,
             },
             &mut out,
             &mut seen,
         );
-    }
-    // 最近使用时间 = 项目会话目录下全部 jsonl 的最大 mtime（前端排序用；
-    // missing 项的会话目录可能仍在，照常计算——代码已删但最近用过的项目仍靠前）
-    for item in out.iter_mut() {
-        item.last_active =
-            latest_session_mtime(&projects_dir.join(mangle_project_path(&item.path)));
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
@@ -460,7 +423,8 @@ fn ensure_projects_migrated_in(root: &Path) {
             projects.push(p.clone());
         }
     }
-    let _ = save_config_to(root, projects, Vec::new(), cfg.dark, cfg.close_action);
+    let _ = save_config_to(root, Vec::new(), projects, Vec::new(), cfg.dark, cfg.close_action);
+    // ↑ order 传空：旧版 favorites 存的是脚本 key（非路径），无法承接为排序
 }
 
 #[tauri::command]
@@ -479,6 +443,7 @@ fn add_project(path: String) -> Result<(), String> {
     // 重新加入 = 解除排除
     cfg.excluded.retain(|x| !x.eq_ignore_ascii_case(&path));
     save_config(
+        cfg.order.clone(),
         cfg.projects.clone(),
         cfg.excluded.clone(),
         cfg.dark,
@@ -490,6 +455,8 @@ fn add_project(path: String) -> Result<(), String> {
 fn remove_project(path: String) -> Result<(), String> {
     let mut cfg = load_config();
     remove_project_from(&mut cfg.projects, &path);
+    // 手动排序里同步移除（列表键 = 项目路径）
+    remove_project_from(&mut cfg.order, &path);
     // 加入排除清单：会话扫描会重新发现该项目，必须过滤才能让「移除」生效
     if !cfg
         .excluded
@@ -499,6 +466,7 @@ fn remove_project(path: String) -> Result<(), String> {
         cfg.excluded.push(path.clone());
     }
     save_config(
+        cfg.order.clone(),
         cfg.projects.clone(),
         cfg.excluded.clone(),
         cfg.dark,
@@ -528,6 +496,7 @@ fn load_config_from(root: &Path) -> Config {
 /// 保存配置：写临时文件 → 旧文件备份为 .bak → 原子替换
 #[tauri::command]
 fn save_config(
+    order: Vec<String>,
     projects: Vec<String>,
     excluded: Vec<String>,
     dark: bool,
@@ -535,6 +504,7 @@ fn save_config(
 ) -> Result<(), String> {
     save_config_to(
         &resolve_root_dir(),
+        order,
         projects,
         excluded,
         dark,
@@ -544,12 +514,14 @@ fn save_config(
 
 fn save_config_to(
     root: &Path,
+    order: Vec<String>,
     projects: Vec<String>,
     excluded: Vec<String>,
     dark: bool,
     close_action: Option<String>,
 ) -> Result<(), String> {
     let cfg = Config {
+        order,
         projects,
         excluded,
         dark,
@@ -3571,34 +3543,17 @@ mod tests {
     }
 
     #[test]
-    fn list_projects_impl_sets_last_active_from_session_mtime() {
-        let root = temp_root("proj-lastactive");
-        let projects = root.join("projects");
-        let real = Path::new(&root).join("real_proj");
-        fs::create_dir_all(&real).unwrap();
-        // real_proj 的会话目录 + 一个 jsonl → last_active = 其 mtime
-        let sess = projects.join(mangle_project_path(real.to_str().unwrap()));
-        fs::create_dir_all(&sess).unwrap();
-        fs::write(sess.join("5426d6d0-c08f-43bd-94df-4d6d99e5c699.jsonl"), "{}").unwrap();
-        // 不存在的路径按平台取样式（叶子名提取随平台分隔符）
-        let ghost = if cfg!(windows) { "D:\\ghost\\path" } else { "/ghost/path" };
-
-        let list = list_projects_impl(
-            &projects,
-            &[real.to_str().unwrap().to_string(), ghost.to_string()],
-            &[],
-        );
-        // 不断言条目数：长临时路径下 unmangle 候选数受限（unmangle_long_path_limits_candidates），
-        // 扫描可能额外产出一个 missing 的歧义路径项，与 last_active 语义无关
-        let real_item = list.iter().find(|x| x.path == real.to_str().unwrap()).unwrap();
-        assert!(!real_item.missing);
-        // 有会话文件 → last_active = 其 mtime（刚写入，必为近期时间）
-        assert!(real_item.last_active.unwrap_or(0) > 1_600_000_000_000);
-        let ghost_item = list.iter().find(|x| x.path == ghost).unwrap();
-        assert!(ghost_item.missing);
-        // 无会话目录 → None（前端排序垫底）
-        assert!(ghost_item.last_active.is_none());
-        fs::remove_dir_all(&root).unwrap();
+    fn config_order_aliases_legacy_favorites() {
+        // 旧版 favorites 键（路径语义）经 serde alias 无缝承接为 order 初始排序
+        let cfg: Config = serde_json::from_str(
+            r#"{"favorites": ["D:\\a", "D:\\b"], "projects": [], "dark": false}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.order, vec!["D:\\a".to_string(), "D:\\b".to_string()]);
+        // 写回后键名为 order，favorites 不再出现
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"order\""));
+        assert!(!json.contains("\"favorites\""));
     }
 
     #[test]

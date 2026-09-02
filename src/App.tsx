@@ -32,6 +32,7 @@ export default function App() {
   const [items, setItems] = useState<Project[]>([]);
   const [projectDirs, setProjectDirs] = useState<string[]>([]);
   const [excludedDirs, setExcludedDirs] = useState<string[]>([]);
+  const [order, setOrder] = useState<string[]>([]);
   const [dark, setDark] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -99,7 +100,7 @@ export default function App() {
       setCloseChoiceOpen(false);
       if (remember) {
         setCloseAction(action);
-        await api.saveConfig(projectDirs, excludedDirs, dark, action).catch(() => {});
+        await api.saveConfig(order, projectDirs, excludedDirs, dark, action).catch(() => {});
       }
       if (action === "minimize") {
         await getCurrentWindow().hide();
@@ -107,7 +108,7 @@ export default function App() {
         await api.quitApp();
       }
     },
-    [projectDirs, excludedDirs, dark],
+    [order, projectDirs, excludedDirs, dark],
   );
 
   // ---------- 数据加载 ----------
@@ -116,6 +117,7 @@ export default function App() {
     try {
       const [list, cfg] = await Promise.all([api.listProjects(), api.loadConfig()]);
       setItems(list);
+      setOrder(cfg.order ?? []);
       setProjectDirs(cfg.projects ?? []);
       setExcludedDirs(cfg.excluded ?? []);
       setDark(cfg.dark ?? false);
@@ -164,12 +166,13 @@ export default function App() {
     window.setTimeout(() => setToast(null), 2500);
   }, []);
 
-  // ---------- 主题 ----------
+  // ---------- 排序 / 主题 ----------
 
   const persistConfig = useCallback(
-    async (d: boolean, ca?: CloseAction) => {
+    async (ord: string[], d: boolean, ca?: CloseAction) => {
       try {
         await api.saveConfig(
+          ord,
           projectDirs,
           excludedDirs,
           d,
@@ -185,27 +188,54 @@ export default function App() {
   const toggleTheme = useCallback(async () => {
     const next = !dark;
     setDark(next);
-    await persistConfig(next);
-  }, [dark, persistConfig]);
+    await persistConfig(order, next);
+  }, [dark, order, persistConfig]);
 
   // ---------- 列表派生数据 ----------
 
   const sorted = useMemo(() => {
     const q = search.trim().toLowerCase();
-    // 最近使用倒序（lastActive = 项目最近一次会话的 mtime）；无记录按名称垫底
-    return items
-      .filter(
-        (l) =>
-          !q ||
-          l.name.toLowerCase().includes(q) ||
-          l.path.toLowerCase().includes(q),
-      )
-      .sort(
-        (a, b) =>
-          (b.lastActive ?? -1) - (a.lastActive ?? -1) ||
-          a.name.localeCompare(b.name, "zh-Hans-CN"),
-      );
-  }, [items, search]);
+    const filtered = items.filter(
+      (l) =>
+        !q ||
+        l.name.toLowerCase().includes(q) ||
+        l.path.toLowerCase().includes(q),
+    );
+    // 手动排序组按 order 数组顺序渲染（拖拽排序的真源）；
+    // 未收录的（新发现/从未拖过）按名称追加在后
+    const byKey = new Map(filtered.map((l) => [l.key, l]));
+    const known = order
+      .map((k) => byKey.get(k))
+      .filter((l): l is Project => !!l);
+    const rest = filtered
+      .filter((l) => !order.includes(l.key))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+    return [...known, ...rest];
+  }, [items, order, search]);
+
+  /** 全局拖拽排序：以「order 收录项 + 其余按名称」拼出当前全序列，
+   *  重排后整表作为新 order 落盘（此后全部项目都有显式顺序） */
+  const reorder = useCallback(
+    async (draggedKey: string, targetKey: string, before: boolean) => {
+      if (draggedKey === targetKey) return;
+      const knownKeys = new Set(order);
+      const base = [
+        ...order,
+        ...items
+          .filter((l) => !knownKeys.has(l.key))
+          .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"))
+          .map((l) => l.key),
+      ];
+      if (!base.includes(draggedKey) || !base.includes(targetKey)) return;
+      const next = base.filter((k) => k !== draggedKey);
+      const to = next.indexOf(targetKey);
+      next.splice(before ? to : to + 1, 0, draggedKey);
+      if (next.every((k, i) => k === base[i])) return; // 位置未变，免写盘
+      setOrder(next);
+      await persistConfig(next, dark);
+    },
+    [order, items, dark, persistConfig],
+  );
 
   const missing = items.filter((l) => l.healthy === false);
 
@@ -429,6 +459,8 @@ export default function App() {
             sessionsByKey={sessionsByKey}
             onSelect={setSelectedKey}
             onLaunch={launch}
+            dragEnabled={search.trim() === ""}
+            onReorder={reorder}
             onToggleExpand={toggleExpand}
             onRenameSession={(key, session) => setRenameTarget({ session, key })}
             onDeleteSession={confirmDeleteSession}
@@ -524,7 +556,7 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           onSave={async (action) => {
             setCloseAction(action);
-            await persistConfig(dark, action);
+            await persistConfig(order, dark, action);
             setSettingsOpen(false);
             showToast("设置已保存");
           }}
